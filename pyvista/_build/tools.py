@@ -11,6 +11,7 @@ import re
 import shutil
 import subprocess
 import sys
+import sysconfig
 from typing import TYPE_CHECKING
 
 from packaging.specifiers import SpecifierSet
@@ -57,6 +58,50 @@ class Tool:
 
 
 _VERSION_RE = re.compile(r'(\d+\.\d+(?:\.\d+)?)')
+
+
+def git_tool() -> Tool:
+    """Return the git :class:`Tool`.
+
+    Returns
+    -------
+    Tool
+        Fresh, undetected git tool.
+
+    """
+    return Tool('git', ('git',), instructions='Install git: https://git-scm.com/downloads')
+
+
+def scripts_dir() -> str:
+    """Return the directory pip installs this interpreter's console scripts into.
+
+    Returns
+    -------
+    str
+        Scripts directory.
+
+    """
+    return sysconfig.get_path('scripts')
+
+
+def which(name: str, env: Mapping[str, str] | None = None) -> str:
+    """Resolve an executable against an environment's ``PATH``.
+
+    Parameters
+    ----------
+    name : str
+        Executable name or path.
+
+    env : Mapping[str, str], optional
+        Environment whose ``PATH`` to search. Defaults to the process environment.
+
+    Returns
+    -------
+    str
+        Full path when found, else ``name`` unchanged.
+
+    """
+    return shutil.which(name, path=(env or os.environ).get('PATH')) or name
 
 
 def executable_version(path: str) -> str | None:
@@ -193,7 +238,7 @@ def required_tools(os_name: str, tool_specs: Mapping[str, str], *, repair: bool)
 
     """
     tools = [
-        Tool('git', ('git',), instructions='Install git: https://git-scm.com/downloads'),
+        git_tool(),
         Tool('cmake', ('cmake',), spec=tool_specs.get('cmake', ''), pip='cmake'),
         Tool('ninja', ('ninja',), spec=tool_specs.get('ninja', ''), pip='ninja'),
     ]
@@ -351,15 +396,13 @@ def msvc_environment(
 
     """
     base = dict(env if env is not None else os.environ)
-    out = subprocess.run(  # noqa: S602
-        f'"{vcvarsall}" {arch} >nul && set',
-        shell=True,
+    out = subprocess.run(
+        f'cmd /u /c ""{vcvarsall}" {arch} >nul && set"',
         env=base,
         capture_output=True,
-        text=True,
         check=True,
     ).stdout
-    for line in out.splitlines():
+    for line in out.decode('utf-16-le', errors='replace').splitlines():
         key, sep, value = line.partition('=')
         if sep:
             base[key] = value

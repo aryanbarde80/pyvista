@@ -170,7 +170,7 @@ def test_interactive_configure_flags(tmp_path: Path, mocker: MockerFixture):
     assert '-DCMAKE_BUILD_TYPE=Debug' in cmd
     assert '-DVTK_VERSION_SUFFIX=' in cmd
     assert cmd[-2:] == ['-DX=2', '-DY=3']
-    assert not any('COMPILER_LAUNCHER' in c for c in cmd)
+    assert '-DCMAKE_C_COMPILER_LAUNCHER=' in cmd
     out = console.export_text()
     assert '--build-type must be one of' in out
     assert '--compiler-cache must be one of' in out
