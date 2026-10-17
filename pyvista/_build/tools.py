@@ -396,15 +396,13 @@ def msvc_environment(
 
     """
     base = dict(env if env is not None else os.environ)
-    out = subprocess.run(  # noqa: S602
-        f'"{vcvarsall}" {arch} >nul && set',
-        shell=True,
+    out = subprocess.run(
+        f'cmd /u /c ""{vcvarsall}" {arch} >nul && set"',
         env=base,
         capture_output=True,
-        text=True,
         check=True,
     ).stdout
-    for line in out.splitlines():
+    for line in out.decode('utf-16-le', errors='replace').splitlines():
         key, sep, value = line.partition('=')
         if sep:
             base[key] = value
