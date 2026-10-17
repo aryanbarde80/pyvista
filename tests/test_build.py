@@ -32,6 +32,8 @@ from pyvista._build.manifest import resolve_options
 from pyvista._build.registry import find_manifest
 from pyvista._build.registry import known_backends
 from pyvista._build.registry import shipped_manifest
+from pyvista.core._vtk_utilities import _MAX_SUPPORTED_VTK_VERSION
+from pyvista.core._vtk_utilities import VersionInfo
 
 if TYPE_CHECKING:
     from pytest_mock import MockerFixture
@@ -75,12 +77,30 @@ def demo():
 def test_shipped_vtk_manifest_loads():
     path = shipped_manifest('vtk')
     assert path is not None
-    manifest = load_manifest(path)
+    manifest = load_manifest(path, default_ref='v1')
     assert manifest.name == 'vtk'
     assert manifest.import_name == 'vtkmodules'
     assert 'rendering' in manifest.groups
     assert manifest.groups['headless-egl'].os == ('linux',)
     assert find_manifest('vtk', None).path == path
+    with pytest.raises(ManifestError, match='default_ref'):
+        load_manifest(path)
+
+
+def test_vtk_default_ref_is_max_supported():
+    maximum = VersionInfo._format(_MAX_SUPPORTED_VTK_VERSION)
+    assert find_manifest('vtk', None).default_ref == f'v{maximum}'
+
+
+def test_load_manifest_default_ref(tmp_path: Path):
+    path = tmp_path / 'pyvista-build.toml'
+    path.write_text(
+        'manifest_version = 1\n[backend]\nname = "x"\nimport_name = "x"\ndefault_ref = "r"\n'
+    )
+    assert load_manifest(path, default_ref='other').default_ref == 'r'
+    path.write_text('manifest_version = 1\nbackend = 1\n')
+    with pytest.raises(ManifestError, match='backend'):
+        load_manifest(path, default_ref='other')
 
 
 @pytest.mark.parametrize('os_name', OS_NAMES)

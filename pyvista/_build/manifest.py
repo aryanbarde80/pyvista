@@ -396,13 +396,16 @@ def parse_manifest(data: dict[str, Any], path: Path | None = None) -> Manifest:
     )
 
 
-def load_manifest(path: Path) -> Manifest:
+def load_manifest(path: Path, *, default_ref: str | None = None) -> Manifest:
     """Read and validate a manifest file.
 
     Parameters
     ----------
     path : Path
         ``pyvista-build.toml`` to read.
+
+    default_ref : str, optional
+        ``[backend] default_ref`` to use when the file sets none.
 
     Returns
     -------
@@ -415,6 +418,8 @@ def load_manifest(path: Path) -> Manifest:
     except tomllib.TOMLDecodeError as err:
         msg = f'{path}: {err}'
         raise ManifestError(msg) from None
+    if default_ref is not None and isinstance(data.get('backend'), dict):
+        data['backend'].setdefault('default_ref', default_ref)
     return parse_manifest(data, path)
 
 
