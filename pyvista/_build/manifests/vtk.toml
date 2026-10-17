@@ -1,7 +1,6 @@
 manifest_version = 1
 
 [backend]
-default_ref = "v9.7.1" # newest VTK release
 import_name = "vtkmodules"
 name = "vtk"
 url = "https://gitlab.kitware.com/vtk/vtk.git"
