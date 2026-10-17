@@ -352,7 +352,7 @@ class Builder:
         return sys.executable
 
     def hooks(self, name: str) -> None:
-        """Run the manifest's hook commands inside the source tree.
+        """Run the manifest's hook commands inside the source tree, with the options' variables.
 
         Parameters
         ----------
@@ -362,7 +362,7 @@ class Builder:
         """
         cfg = self.config
         for template in self.manifest.hooks.get(name, ()):
-            self.run(self._expand(template), cwd=cfg.src_dir)
+            self.run(self._expand(template), cwd=cfg.src_dir, env=self.configure_env())
 
     def _expand(self, template: str) -> list[str]:
         """Split a manifest command template, then substitute the placeholders per part."""
