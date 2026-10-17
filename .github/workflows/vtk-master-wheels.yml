@@ -123,7 +123,7 @@ jobs:
 
       - name: Install PyVista
         shell: bash
-        # Editable so that `--manylinux` installs this checkout inside the container too.
+        # `--manylinux` mounts this installed PyVista into the container.
         run: python -m pip install --upgrade pip -e .
 
       # An artifact, not actions/cache: the repository's shared 10 GB cache quota evicts a
@@ -135,9 +135,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           BRANCH: ${{ github.head_ref || github.ref_name }}
         run: |
-          # Newest first: this branch's own upload, else main's.
+          # Newest first: this branch's own upload, else main's, from this repository only.
           if ! run_id="$(gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts?name=compiler-cache-${RUNNER_OS}&per_page=50" \
-            --jq '[.artifacts[] | select(.expired | not)] as $a
+            --jq '[.artifacts[] | select((.expired | not) and .workflow_run.head_repository_id == .workflow_run.repository_id)] as $a
               | ([$a[] | select(.workflow_run.head_branch == env.BRANCH)] + [$a[] | select(.workflow_run.head_branch == "main")])[0].workflow_run.id // empty')"; then
             echo "::warning::Could not list the compiler cache artifacts; building cold"
             run_id=""
@@ -168,21 +168,23 @@ jobs:
 
       - name: Build VTK wheel
         shell: bash
-        # --manylinux (Linux) builds inside the manylinux_2_28 container; the command fetches its own tools.
+        # --manylinux (Linux) builds inside the manylinux_2_28 container.
         env:
           MANYLINUX: ${{ runner.os == 'Linux' && '--manylinux' || '' }}
         run: |
-          python -m pyvista build vtk $MANYLINUX \
+          python -m pyvista build vtk $MANYLINUX --yes \
             --source vtk-src --build-dir vtk-build --cache-dir compiler-cache --no-install --opt smp=Sequential \
             --version-suffix "dev0+g${VTK_NIGHTLY_SHA:0:8}"
 
       - name: Show the full build log
         if: failure()
         shell: bash
-        run: cat vtk-build/build.log
+        run: |
+          if [ -f vtk-build/build.log ]; then cat vtk-build/build.log; else echo "The build stopped before compiling."; fi
 
+      # Fork pull requests read the cache but never upload one.
       - name: Upload compiler cache
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
         uses: actions/upload-artifact@v7
         with:
           name: compiler-cache-${{ runner.os }}
