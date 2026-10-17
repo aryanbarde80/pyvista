@@ -51,6 +51,7 @@ def test_cli_env_backend(
     assert 'Building backend: vtk' in out
     assert str(tmp_path / 'vtk-build') in ''.join(out.split())
     assert '-DX=1' in out
+    assert 'To build a fork instead' not in out
 
 
 def test_cli_source_and_url_exclusive(capsys: pytest.CaptureFixture):
@@ -206,7 +207,9 @@ def test_interactive_source_prompt(tmp_path: Path, mocker: MockerFixture):
     answers = iter(['nonsense', 'https://example.com/me/vtk.git', 'mybranch'])
     mocker.patch.object(phases.Prompt, 'ask', side_effect=lambda *_, **__: next(answers))
     builder.phase_source()
-    assert 'neither a git checkout nor a git URL' in console.export_text()
+    out = console.export_text()
+    assert 'neither a git checkout nor a git URL' in out
+    assert 'To build a fork instead' in out
     assert git.call_args_list[0].args[2] == 'https://example.com/me/vtk.git'
     assert git.call_args_list[1].args[-1] == 'mybranch'
 

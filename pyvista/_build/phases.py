@@ -438,10 +438,11 @@ class Builder:
                     f'[bold]{cfg.src_dir}[/bold] (blob-less partial clone: history without '
                     'file contents until needed).'
                 )
-                self.say(
-                    'To build a fork instead, answer with its git URL (https://... or '
-                    'git@...), or with the path of a local checkout to build that one.'
-                )
+                if cfg.prompting:
+                    self.say(
+                        'To build a fork instead, answer with its git URL (https://... or '
+                        'git@...), or with the path of a local checkout to build that one.'
+                    )
                 source = self._ask_source(
                     'Clone it now?', stop='Nothing to build without a source checkout.'
                 )
