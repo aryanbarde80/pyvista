@@ -265,9 +265,9 @@ def test_supported_vtk_versions_match_pin(pytestconfig):
 def test_installed_vtk_not_newer_than_max_supported():
     try:
         installed = Version(version('vtk'))
-    except PackageNotFoundError:
+    except PackageNotFoundError:  # pragma: no cover -- VTK built from source
         pytest.skip('VTK is not installed from a distribution')
-    if installed.is_prerelease or installed.local:
+    if installed.is_prerelease or installed.local:  # pragma: no cover -- VTK nightly
         pytest.skip('Checks VTK releases only')
     maximum = VersionInfo._format(_MAX_SUPPORTED_VTK_VERSION)
     assert installed <= Version(maximum), (
