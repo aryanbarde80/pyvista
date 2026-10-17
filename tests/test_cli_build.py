@@ -290,6 +290,16 @@ def test_interactive_reuse_prompt(tmp_path: Path, mocker: MockerFixture):
         builder.phase_source()
     assert (cfg.src_dir / '.git').exists()
 
+    cfg_url = _config(tmp_path, dry_run=False, interactive=True, url='https://example.com/f.git')
+    builder = Builder(cfg_url, Console(record=True, width=4000, force_terminal=False))
+    git = mocker.patch.object(builder, 'git', return_value='')
+    mocker.patch.object(phases.Prompt, 'ask', return_value='y')
+    confirm = mocker.patch.object(phases.Confirm, 'ask', return_value=False)
+    builder.phase_source()
+    assert 'Reusing the checkout' in builder.console.export_text()
+    assert not confirm.called
+    assert not git.called
+
     builder = Builder(_config(tmp_path, dry_run=False, interactive=True), Console(quiet=True))
     git = mocker.patch.object(builder, 'git', return_value='')
     mocker.patch.object(
@@ -297,8 +307,61 @@ def test_interactive_reuse_prompt(tmp_path: Path, mocker: MockerFixture):
     )
     mocker.patch.object(phases.Confirm, 'ask', return_value=True)
     builder.phase_source()
+    assert not cfg.src_dir.exists()
     assert git.call_args_list[0].args[2] == 'https://example.com/me/vtk.git'
     assert git.call_args_list[1].args[-1] == 'dev'
+
+
+@pytest.mark.usefixtures('no_tools')
+def test_source_dir_that_is_not_a_checkout(tmp_path: Path, mocker: MockerFixture):
+    """A non-empty ``<build-dir>/src`` without git is kept; an empty one is cloned into."""
+    cfg = _config(tmp_path, dry_run=False)
+    cfg.src_dir.mkdir(parents=True)
+    (cfg.src_dir / 'pyproject.toml').write_text('')
+    builder = Builder(cfg, Console(quiet=True))
+    git = mocker.patch.object(builder, 'git', return_value='')
+    with pytest.raises(phases.BuildError, match='exists but is not a git checkout'):
+        builder.phase_source()
+    assert (cfg.src_dir / 'pyproject.toml').exists()
+    assert not git.called
+    (cfg.src_dir / 'pyproject.toml').unlink()
+    builder.phase_source()
+    assert git.call_args_list[0].args[0] == 'clone'
+
+
+@pytest.mark.usefixtures('no_tools')
+def test_url_with_existing_checkout_is_reported(tmp_path: Path):
+    cfg = _config(tmp_path, url='https://example.com/f.git')
+    (cfg.src_dir / '.git').mkdir(parents=True)
+    console = Console(record=True, width=4000, force_terminal=False)
+    Builder(cfg, console).phase_source()
+    assert '--url is not used: the checkout at' in console.export_text()
+
+
+def test_parse_flags_inline_values():
+    valued = {'-D', '--define', '--version-suffix'}
+    pairs = Builder._parse_flags('-DA=1 --version-suffix= --define=B=2 -D C=3', set(), valued)
+    assert pairs == [('-D', 'A=1'), ('--version-suffix', ''), ('--define', 'B=2'), ('-D', 'C=3')]
+
+
+def test_configure_walk_keeps_spaces_in_defines(tmp_path: Path, mocker: MockerFixture):
+    cfg = _config(tmp_path, compiler_cache='none', version_suffix='')
+    builder = Builder(cfg, Console(quiet=True))
+    builder._manifest = phases.find_manifest('vtk', None)
+    answers = iter(['Release', 'none', '', 'X="a b" Y=2', 'Release', 'none', '', '"X=1'])
+    defaults = []
+
+    def ask(*_, default='', **__):
+        defaults.append(default)
+        return next(answers)
+
+    mocker.patch.object(phases.Prompt, 'ask', side_effect=ask)
+    builder._walk_configure_settings()
+    assert cfg.defines == ['X=a b', 'Y=2']
+    with pytest.raises(phases.BuildError, match='Cannot parse'):
+        builder._walk_configure_settings()
+    assert defaults[-1] == "'X=a b' Y=2"
+    assert cfg.defines == ['X=a b', 'Y=2']
 
 
 def test_prompts_print_brackets_verbatim():
@@ -327,15 +390,33 @@ def test_cli_manylinux(mocker: MockerFixture, tmp_path: Path, monkeypatch: pytes
     assert captured[-1].manylinux == 'my/image'
     main('build vtk --dry-run -i')
     assert captured[-1].interactive is True
+    assert captured[-1].yes is False
+    main('build vtk --dry-run --yes')
+    assert captured[-1].yes is True
+    main('build vtk --dry-run -y --install')
+    assert (captured[-1].yes, captured[-1].install) == (True, True)
+
+
+def test_cli_manylinux_image_needs_manylinux(capsys: pytest.CaptureFixture):
+    with pytest.raises(SystemExit):
+        main('build vtk --dry-run --manylinux-image my/image')
+    assert '--manylinux-image needs --manylinux' in capsys.readouterr().err
+
+
+def test_cli_end_of_input(mocker: MockerFixture, tmp_path: Path):
+    mocker.patch.object(Builder, 'build', side_effect=EOFError)
+    with pytest.raises(SystemExit) as info:
+        main(f'build vtk --dry-run --build-dir {tmp_path}')
+    assert info.value.code == 130
 
 
 def test_cli_build_error(mocker: MockerFixture, tmp_path: Path, capsys: pytest.CaptureFixture):
-    mocker.patch.object(Builder, 'build', side_effect=phases.BuildError('no compiler'))
+    mocker.patch.object(Builder, 'build', side_effect=phases.BuildError('no [bold]compiler[/x]'))
     with pytest.raises(SystemExit):
         main(f'build vtk --dry-run --build-dir {tmp_path}')
     err = capsys.readouterr().err
     assert 'PyVista build stopped' in err
-    assert 'no compiler' in err
+    assert 'no [bold]compiler[/x]' in err
 
 
 def test_default_ref_without_shipped_manifest(tmp_path: Path):
@@ -347,7 +428,9 @@ def test_existing_checkout_declined(tmp_path: Path, mocker: MockerFixture):
     src = tmp_path / 'src'
     src.mkdir()
     builder = Builder(_config(tmp_path, dry_run=False, ref='v1'), Console(quiet=True))
-    git = mocker.patch.object(builder, 'git', return_value='')
+    git = mocker.patch.object(
+        builder, 'git', side_effect=lambda *a, **_: a[-1] if a[0] == 'rev-parse' else ''
+    )
     mocker.patch.object(builder, 'confirm', return_value=False)
     builder._existing_checkout(src)
     assert not any('checkout' in call.args for call in git.call_args_list)
@@ -355,7 +438,7 @@ def test_existing_checkout_declined(tmp_path: Path, mocker: MockerFixture):
 
 @pytest.mark.usefixtures('no_tools')
 def test_interactive_selection_parse_errors(tmp_path: Path, mocker: MockerFixture):
-    """An unbalanced quote is reported and ``--all`` turns every group on."""
+    """An unbalanced quote or a clashing flag is reported and leaves the selection as it was."""
     mocker.patch.object(phases.sys.stdin, 'isatty', return_value=True)
     answers = iter(['y', '--with "web', '--minimal', '--all', ''])
     mocker.patch.object(
@@ -367,25 +450,49 @@ def test_interactive_selection_parse_errors(tmp_path: Path, mocker: MockerFixtur
     builder.phase_source()
     builder.phase_tools()
     builder.phase_groups()
-    assert 'Cannot parse' in console.export_text()
-    assert builder.config.all_
-    assert not builder.config.minimal
+    out = console.export_text()
+    assert 'Cannot parse' in out
+    assert 'conflicts with' in out
+    assert not builder.config.all_
+    assert builder.config.minimal
+    assert builder.groups == []
+
+
+def _walk_answers(smp: str, answers: list[str]):
+    """Return a ``Prompt.ask`` stand-in: ``smp`` for the smp option, else the next answer."""
+    queue = iter(answers)
+    return lambda question='', **_: smp if question.startswith('smp') else next(queue)
 
 
 @pytest.mark.usefixtures('no_tools')
-def test_adjust_selection_errors(tmp_path: Path, mocker: MockerFixture):
-    """A bad option value or an unresolvable selection stops the walk with a message."""
-    builder = Builder(_config(tmp_path, ref='v9.7.0'), Console(quiet=True))
+def test_walk_writes_the_configuration(tmp_path: Path, mocker: MockerFixture):
+    """A bad walk answer keeps the old selection; a good one survives later flags."""
+    console = Console(record=True, width=4000, force_terminal=False)
+    builder = Builder(_config(tmp_path, ref='v9.7.0'), console)
     builder.phase_source()
     builder.phase_groups()
+    before = list(builder.groups)
     mocker.patch.object(phases.Confirm, 'ask', return_value=True)
-    mocker.patch.object(phases.Prompt, 'ask', return_value='bogus')
-    with pytest.raises(phases.BuildError, match='bogus'):
-        builder._adjust_selection()
-    mocker.patch.object(phases.Prompt, 'ask', side_effect=lambda *_, default='', **__: default)
-    mocker.patch.object(phases, 'resolve_groups', side_effect=phases.ManifestError('clash'))
-    with pytest.raises(phases.BuildError, match='clash'):
-        builder._adjust_selection()
+    mocker.patch.object(phases.Prompt, 'ask', side_effect=_walk_answers('bogus', ['n', 'y']))
+    ask = dict(
+        apply=builder._apply_selection_flags,
+        resolve=builder._resolve_selection,
+        show=builder._print_selection,
+        walk=builder._adjust_selection,
+    )
+    builder._ask_until_yes('Build?', **ask)
+    assert 'bogus' in console.export_text()
+    assert (builder.config.options, builder.config.minimal) == ([], False)
+    assert builder.groups == before
+    mocker.patch.object(phases.Prompt, 'ask', side_effect=_walk_answers('TBB', ['n', 'y']))
+    builder._ask_until_yes('Build?', **ask)
+    assert builder.config.options == ['smp=TBB']
+    assert 'headless-egl' in builder.groups
+    builder._apply_selection_flags('--without web')
+    builder._resolve_selection()
+    assert builder.option_values['smp'] == 'TBB'
+    assert 'web' not in builder.groups
+    assert 'headless-egl' in builder.groups
 
 
 @pytest.mark.usefixtures('no_tools')
@@ -394,6 +501,7 @@ def test_interactive_clean_declined_and_cache_kept(tmp_path: Path, mocker: Mocke
     mocker.patch.object(phases.sys.stdin, 'isatty', return_value=True)
     cfg = _config(tmp_path, dry_run=False, interactive=True, clean=True, compiler_cache='none')
     cfg.cmake_dir.mkdir(parents=True)
+    (cfg.cmake_dir / 'kept').write_text('')
     answers = iter(['y', 'y', 'n', 'Release', 'none', '', '', 'y'])
     mocker.patch.object(phases.Prompt, 'ask', side_effect=lambda *_, **__: next(answers))
     mocker.patch.object(phases.Confirm, 'ask', return_value=False)
@@ -403,5 +511,5 @@ def test_interactive_clean_declined_and_cache_kept(tmp_path: Path, mocker: Mocke
     builder.phase_tools()
     builder.phase_groups()
     builder.phase_configure()
-    assert cfg.cmake_dir.exists()
+    assert (cfg.cmake_dir / 'kept').exists()
     assert cfg.compiler_cache == 'none'

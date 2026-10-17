@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 from dataclasses import field
+from dataclasses import fields
 import json
 import os
 from pathlib import Path
@@ -468,6 +470,12 @@ class Builder:
             ref = cfg.ref
             if ref is None and shipped is not None:
                 ref = find_manifest(cfg.backend, None).default_ref
+            if not replacing and cfg.src_dir.is_dir() and any(cfg.src_dir.iterdir()):
+                msg = (
+                    f'{cfg.src_dir} exists but is not a git checkout. Move it away, or pass '
+                    '--build-dir to build somewhere else.'
+                )
+                raise BuildError(msg)
             if not replacing:
                 self.say(
                     f'The source will be cloned from [bold]{url}[/bold] into '
@@ -479,17 +487,17 @@ class Builder:
                         'To build a fork instead, answer with its git URL (https://... or '
                         'git@...), or with the path of a local checkout to build that one.'
                     )
-                source = self._ask_source(
+                source, _ = self._ask_source(
                     'Clone it now?', stop='Nothing to build without a source checkout.'
                 )
                 if source is not None:
-                    self.say(f'Using the existing checkout at [bold]{source}[/bold].')
+                    self.say(f'Using the existing checkout at [bold]{escape(str(source))}[/bold].')
                     cfg.source = source
                     self._existing_checkout(source)
                     self._load_manifest(shipped)
                     return
             url, ref = cfg.url or url, cfg.ref or ref
-            if cfg.src_dir.exists() and not cfg.dry_run:
+            if replacing and not cfg.dry_run:
                 shutil.rmtree(cfg.src_dir)
             self.git('clone', '--filter=blob:none', url, str(cfg.src_dir))
             if ref is None and not cfg.dry_run:
@@ -523,20 +531,25 @@ class Builder:
         """
         cfg = self.config
         if not cfg.prompting:
+            if cfg.url is not None:
+                self.say(
+                    f'[yellow]--url is not used: the checkout at {cfg.src_dir} is reused. '
+                    'Pass --build-dir to clone the URL somewhere else.[/yellow]'
+                )
             return False
         self.say(
             f'A checkout already exists at [bold]{cfg.src_dir}[/bold]. Answer y to build it '
             'as is, a git URL (https://... or git@...) to delete it and clone that fork in '
             'its place, or the path of a local checkout to build that one.'
         )
-        source = self._ask_source(
+        source, typed_url = self._ask_source(
             'Reuse it?',
             stop=f'Stopped. Delete {cfg.src_dir} or pass --build-dir to build elsewhere.',
         )
         if source is not None:
             cfg.source = source
             return False
-        if cfg.url is None:
+        if not typed_url:
             return False
         self.say(f'[yellow]{cfg.src_dir} will be deleted and cloned again.[/yellow]')
         if not self.confirm('Delete it? (n stops and keeps it)', default=False):
@@ -544,7 +557,7 @@ class Builder:
             raise BuildError(msg)
         return True
 
-    def _ask_source(self, question: str, *, stop: str) -> Path | None:
+    def _ask_source(self, question: str, *, stop: str) -> tuple[Path | None, bool]:
         """Ask ``question``, taking a git URL or a local checkout instead of a yes.
 
         Parameters
@@ -560,12 +573,15 @@ class Builder:
         Path or None
             An existing checkout to use instead, else ``None``.
 
+        bool
+            Whether a git URL was typed; it is then in ``config.url``.
+
         """
         cfg = self.config
         if not cfg.prompting:
             if not self.confirm(question):
                 raise BuildError(stop)
-            return None
+            return None, False
         while True:
             answer = Prompt.ask(
                 f'{question} [y / n = stop / git URL / path to a checkout]',
@@ -573,14 +589,14 @@ class Builder:
                 console=self.console,
             ).strip()
             if answer.lower() in ('y', 'yes'):
-                return None
+                return None, False
             if answer.lower() in ('n', 'no'):
                 raise BuildError(stop)
             path = Path(answer).expanduser()
             if (path / '.git').exists():
-                return path.resolve()
+                return path.resolve(), False
             if path.exists() or ('://' not in answer and not answer.startswith('git@')):
-                self.say(f'[red]{answer} is neither a git checkout nor a git URL.[/red]')
+                self.say(f'[red]{escape(answer)} is neither a git checkout nor a git URL.[/red]')
                 continue
             cfg.url = answer
             cfg.ref = Prompt.ask(
@@ -588,8 +604,11 @@ class Builder:
                 default=cfg.ref or self._default_ref(),
                 console=self.console,
             )
-            self.say(f'Cloning [bold]{cfg.url}[/bold] at [bold]{cfg.ref}[/bold] instead.')
-            return None
+            self.say(
+                f'Cloning [bold]{escape(cfg.url)}[/bold] at [bold]{escape(cfg.ref)}[/bold] '
+                'instead.'
+            )
+            return None, True
 
     def _default_ref(self) -> str:
         """Return the shipped manifest's default ref, or ``'master'`` without one."""
@@ -867,15 +886,19 @@ class Builder:
             answer = Prompt.ask(question, default='y', console=self.console).strip()
             if answer.lower() in ('y', 'yes'):
                 return
-            if answer.lower() in ('n', 'no'):
-                walk()
-                show()
-                continue
+            saved = (copy.deepcopy(self.config), self.launcher, dict(self.env))
             try:
-                apply(answer)
+                if answer.lower() in ('n', 'no'):
+                    walk()
+                else:
+                    apply(answer)
                 resolve()
             except BuildError as err:
-                self.say(f'[red]{err}[/red]')
+                config, self.launcher, self.env = saved
+                for name in (f.name for f in fields(config)):
+                    setattr(self.config, name, getattr(config, name))
+                resolve()
+                self.say(f'[red]{escape(str(err))}[/red]')
                 continue
             show()
 
@@ -924,11 +947,13 @@ class Builder:
         pairs: list[tuple[str, str]] = []
         i = 0
         while i < len(words):
-            flag, _, inline = words[i].partition('=')
-            if flag in switches:
+            flag, sep, inline = words[i].partition('=')
+            if '-D' in valued and words[i].startswith('-D') and len(words[i]) > 2:
+                pairs.append(('-D', words[i][2:]))
+            elif flag in switches:
                 pairs.append((flag, ''))
             elif flag in valued:
-                if not inline:
+                if not sep:
                     i += 1
                     if i == len(words):
                         msg = f'{flag} needs a value.'
@@ -979,7 +1004,8 @@ class Builder:
         self.console.print(table)
 
     def _adjust_selection(self) -> None:
-        """Ask about every group and option in turn."""
+        """Ask about every group and option in turn, writing the answers to the configuration."""
+        cfg = self.config
         chosen: list[str] = []
         for group in self.manifest.groups_for(self.config.os_name):
             clash = sorted(set(group.conflicts) & set(chosen))
@@ -992,6 +1018,7 @@ class Builder:
                 console=self.console,
             ):
                 chosen.append(group.name)
+        options = []
         for option in self.manifest.options.values():
             raw = Prompt.ask(
                 f'{option.name} ({option.help})',
@@ -999,16 +1026,9 @@ class Builder:
                 choices=list(option.choices) or None,
                 console=self.console,
             )
-            try:
-                self.option_values[option.name] = option.coerce(raw)
-            except ManifestError as err:
-                raise BuildError(str(err)) from None
-        try:
-            self.groups = resolve_groups(
-                self.manifest, self.config.os_name, with_=chosen, without=[], minimal=True
-            )
-        except ManifestError as err:
-            raise BuildError(str(err)) from None
+            options.append(f'{option.name}={raw}')
+        cfg.with_, cfg.without, cfg.all_, cfg.minimal = chosen, [], False, True
+        cfg.options = options
 
     def version_suffix(self) -> str | None:
         """Return the wheel version suffix.
@@ -1179,7 +1199,8 @@ class Builder:
         table.add_row('Python', str(self.python), '')
         table.add_row('Compiler cache', launcher, '--compiler-cache')
         table.add_row('Version suffix', self.version_suffix() or '(release)', '--version-suffix')
-        table.add_row('Extra cache entries', ' '.join(cfg.defines) or '(none)', '-D KEY=VALUE')
+        defines = escape(shlex.join(cfg.defines)) or '(none)'
+        table.add_row('Extra cache entries', defines, '-D KEY=VALUE')
         self.console.print(table)
 
     def _walk_configure_settings(self) -> None:
@@ -1203,10 +1224,14 @@ class Builder:
         )
         raw = Prompt.ask(
             'Extra CMake cache entries, KEY=VALUE separated by spaces (empty for none)',
-            default=' '.join(cfg.defines),
+            default=shlex.join(cfg.defines),
             console=self.console,
         )
-        cfg.defines = raw.split()
+        try:
+            cfg.defines = shlex.split(raw)
+        except ValueError as err:
+            msg = f'Cannot parse {raw!r}: {err}'
+            raise BuildError(msg) from None
 
     def _apply_configure_flags(self, text: str) -> None:
         """Apply configure flags typed at the prompt to the configuration."""
