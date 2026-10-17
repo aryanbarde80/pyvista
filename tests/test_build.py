@@ -483,6 +483,7 @@ def test_env_options_and_version_command(tmp_path: Path, mocker: MockerFixture):
         'version_command = "{python} version.py"\n'
         '[options.lto]\nhelp = "LTO"\ndefault = false\nenv = "DEMO_LTO"\n'
         '[options.abi3]\nhelp = "abi3"\ndefault = true\ncmake = "DEMO_ABI3={value}"\n'
+        '[hooks]\npost_configure = ["{python} check.py"]\n'
     )
     mocker.patch.object(tools.shutil, 'which', side_effect=lambda name, **_: f'/usr/bin/{name}')
     mocker.patch.object(tools, 'executable_version', return_value='99.0')
@@ -491,6 +492,7 @@ def test_env_options_and_version_command(tmp_path: Path, mocker: MockerFixture):
     Builder(_config(tmp_path, backend='demo', source=src, options=['lto=1']), console).build()
     out = console.export_text()
     assert '$ DEMO_LTO=1 cmake' in out
+    assert re.search(r'\$ DEMO_LTO=1 \S+ check\.py', out)
     assert '-DDEMO_ABI3=ON' in out
     assert '-DDEMO_LTO' not in out
     assert '-DVTK_VERSION_SUFFIX=<version_command>' in out
