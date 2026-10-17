@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from dataclasses import field
+import string
 import tomllib
 from typing import TYPE_CHECKING
 from typing import Any
@@ -15,6 +16,17 @@ MANIFEST_FILENAME = 'pyvista-build.toml'
 MANIFEST_VERSION = 1
 OS_NAMES = ('linux', 'macos', 'windows')
 HOOK_NAMES = ('post_configure', 'post_build', 'post_wheel')
+PLACEHOLDERS = ('python', 'src_dir', 'build_dir', 'dist_dir', 'wheelhouse')
+TOP_LEVEL_KEYS = (
+    'manifest_version',
+    'backend',
+    'tools',
+    'cmake',
+    'groups',
+    'options',
+    'hooks',
+    'manylinux',
+)
 
 
 class ManifestError(ValueError):
@@ -123,7 +135,7 @@ class Manifest:
     """Parsed ``pyvista-build.toml``."""
 
     name: str
-    import_name: str
+    import_name: str | None
     default_ref: str
     url: str | None
     version_command: str | None
@@ -154,6 +166,16 @@ class Manifest:
         return [g for g in self.groups.values() if os_name in g.os]
 
 
+_TOML_TYPES = {
+    dict: 'a table',
+    list: 'an array',
+    str: 'a string',
+    bool: 'a boolean',
+    int: 'an integer',
+    float: 'a float',
+}
+
+
 def _expect(table: dict[str, Any], key: str, type_: type, *, where: str) -> Any:
     """Return ``table[key]`` checked against ``type_``."""
     if key not in table:
@@ -161,9 +183,18 @@ def _expect(table: dict[str, Any], key: str, type_: type, *, where: str) -> Any:
         raise ManifestError(msg)
     value = table[key]
     if not isinstance(value, type_) or (type_ is int and isinstance(value, bool)):
-        msg = f'{where}: {key!r} must be {type_.__name__}, got {type(value).__name__}.'
+        expected = _TOML_TYPES.get(type_, type_.__name__)
+        got = _TOML_TYPES.get(type(value), type(value).__name__)
+        msg = f'{where}: {key!r} must be {expected}, got {got}.'
         raise ManifestError(msg)
     return value
+
+
+def _optional(table: dict[str, Any], key: str, type_: type, *, where: str, default: Any) -> Any:
+    """Return ``table[key]`` checked against ``type_``, or ``default`` when absent."""
+    if key not in table:
+        return default
+    return _expect(table, key, type_, where=where)
 
 
 def _str_list(
@@ -177,9 +208,46 @@ def _str_list(
     return tuple(value)
 
 
-def _parse_group(name: str, table: dict[str, Any]) -> Group:
+def _table(table: dict[str, Any], key: str, *, where: str) -> dict[str, Any]:
+    """Return ``table[key]`` as a TOML table, empty when absent."""
+    return _optional(table, key, dict, where=where, default={})
+
+
+def _check_keys(table: dict[str, Any], allowed: tuple[str, ...], *, where: str) -> None:
+    """Reject keys outside ``allowed``, so a typo is an error rather than ignored."""
+    unknown = sorted(set(table) - set(allowed))
+    if unknown:
+        msg = f'{where}: unknown key(s) {unknown}; expected some of {list(allowed)}.'
+        raise ManifestError(msg)
+
+
+def _check_placeholders(template: str, allowed: tuple[str, ...], *, where: str) -> None:
+    """Reject ``{name}`` fields outside ``allowed``; ``{{`` and ``}}`` are literal braces."""
+    try:
+        names = {f for _, f, _, _ in string.Formatter().parse(template) if f is not None}
+    except ValueError as err:
+        msg = f'{where}: {template!r}: {err}; write a literal brace as {{{{ or }}}}.'
+        raise ManifestError(msg) from None
+    unknown = sorted(names - set(allowed))
+    if unknown:
+        msg = (
+            f'{where}: {template!r} uses unknown placeholder(s) {unknown}; '
+            f'expected some of {list(allowed)}. Write a literal brace as {{{{ or }}}}.'
+        )
+        raise ManifestError(msg)
+
+
+def _parse_group(name: str, table: Any) -> Group:
     """Build a :class:`Group` from its TOML table."""
     where = f'[groups.{name}]'
+    if not isinstance(table, dict):
+        msg = f'{where} must be a table.'
+        raise ManifestError(msg)
+    _check_keys(
+        table,
+        ('help', 'default', 'cmake', 'cmake_off', 'os', 'conflicts', 'required'),
+        where=where,
+    )
     os_names = _str_list(table, 'os', where=where, default=list(OS_NAMES))
     unknown = set(os_names) - set(OS_NAMES)
     if unknown:
@@ -188,29 +256,42 @@ def _parse_group(name: str, table: dict[str, Any]) -> Group:
     return Group(
         name=name,
         help=_expect(table, 'help', str, where=where),
-        default=bool(table.get('default', False)),
+        default=_optional(table, 'default', bool, where=where, default=False),
         cmake=_str_list(table, 'cmake', where=where),
         cmake_off=_str_list(table, 'cmake_off', where=where),
         os=os_names,
         conflicts=_str_list(table, 'conflicts', where=where),
-        required=bool(table.get('required', False)),
+        required=_optional(table, 'required', bool, where=where, default=False),
     )
 
 
-def _parse_option(name: str, table: dict[str, Any]) -> Option:
+def _parse_option(name: str, table: Any) -> Option:
     """Build an :class:`Option` from its TOML table."""
     where = f'[options.{name}]'
+    if not isinstance(table, dict):
+        msg = f'{where} must be a table.'
+        raise ManifestError(msg)
+    _check_keys(table, ('help', 'default', 'cmake', 'env', 'choices'), where=where)
     default = table.get('default')
     if not isinstance(default, (bool, int, str)):
         msg = f'{where}: "default" must be a bool, int or str.'
         raise ManifestError(msg)
-    cmake = table.get('cmake')
-    env = table.get('env')
+    cmake = _optional(table, 'cmake', str, where=where, default=None)
+    env = _optional(table, 'env', str, where=where, default=None)
     if (cmake is None) == (env is None):
         msg = f'{where}: set exactly one of "cmake" or "env".'
         raise ManifestError(msg)
-    if cmake is not None and '{value}' not in cmake:
-        msg = f'{where}: "cmake" must contain the {{value}} placeholder.'
+    if cmake is not None:
+        if '{value}' not in cmake:
+            msg = f'{where}: "cmake" must contain the {{value}} placeholder.'
+            raise ManifestError(msg)
+        _check_placeholders(cmake, ('value',), where=where)
+    choices = _str_list(table, 'choices', where=where)
+    if choices and not isinstance(default, str):
+        msg = f'{where}: "choices" needs a string "default".'
+        raise ManifestError(msg)
+    if choices and default not in choices:
+        msg = f'{where}: default {default!r} is not one of the choices {list(choices)}.'
         raise ManifestError(msg)
     return Option(
         name=name,
@@ -218,7 +299,7 @@ def _parse_option(name: str, table: dict[str, Any]) -> Option:
         default=default,
         cmake=cmake,
         env=env,
-        choices=_str_list(table, 'choices', where=where),
+        choices=choices,
     )
 
 
@@ -246,48 +327,70 @@ def parse_manifest(data: dict[str, Any], path: Path | None = None) -> Manifest:
             f'this PyVista reads version {MANIFEST_VERSION}.'
         )
         raise ManifestError(msg)
+    _check_keys(data, TOP_LEVEL_KEYS, where='manifest')
     backend = _expect(data, 'backend', dict, where='manifest')
-    tools = data.get('tools', {})
-    if not isinstance(tools, dict) or not all(isinstance(v, str) for v in tools.values()):
+    _check_keys(
+        backend,
+        ('name', 'import_name', 'default_ref', 'url', 'version_command'),
+        where='[backend]',
+    )
+    version_command = _optional(backend, 'version_command', str, where='[backend]', default=None)
+    if version_command is not None:
+        _check_placeholders(version_command, PLACEHOLDERS, where='[backend] version_command')
+    tools = _table(data, 'tools', where='manifest')
+    if not all(isinstance(v, str) for v in tools.values()):
         msg = '[tools]: every entry must be a version specifier string.'
         raise ManifestError(msg)
-    cmake = data.get('cmake', {})
-    if not isinstance(cmake, dict):
-        msg = '[cmake] must be a table.'
+    cmake = _table(data, 'cmake', where='manifest')
+    _check_keys(cmake, ('common', 'init_cache', *OS_NAMES), where='[cmake]')
+    init_cache = _table(cmake, 'init_cache', where='[cmake]')
+    if set(init_cache) - set(OS_NAMES) or not all(isinstance(v, str) for v in init_cache.values()):
+        msg = f'[cmake]: "init_cache" must map {list(OS_NAMES)} to file paths.'
         raise ManifestError(msg)
-    init_cache = cmake.get('init_cache', {})
-    if not isinstance(init_cache, dict) or set(init_cache) - set(OS_NAMES):
-        msg = f'[cmake]: "init_cache" must be a table keyed by {list(OS_NAMES)}.'
-        raise ManifestError(msg)
-    groups = {name: _parse_group(name, t) for name, t in data.get('groups', {}).items()}
+    groups = {
+        name: _parse_group(name, t) for name, t in _table(data, 'groups', where='manifest').items()
+    }
     for group in groups.values():
         missing = set(group.conflicts) - set(groups)
         if missing:
             msg = f'[groups.{group.name}]: conflicts with unknown group(s) {sorted(missing)}.'
             raise ManifestError(msg)
-    options = {name: _parse_option(name, t) for name, t in data.get('options', {}).items()}
-    manylinux = data.get('manylinux', {})
-    if not isinstance(manylinux, dict):
-        msg = '[manylinux] must be a table.'
-        raise ManifestError(msg)
-    hooks_table = data.get('hooks', {})
+    for group in groups.values():
+        for other in group.conflicts:
+            if group.name not in groups[other].conflicts:
+                msg = (
+                    f'[groups.{other}]: list {group.name!r} in "conflicts" too; '
+                    f'[groups.{group.name}] conflicts with it.'
+                )
+                raise ManifestError(msg)
+    options = {
+        name: _parse_option(name, t)
+        for name, t in _table(data, 'options', where='manifest').items()
+    }
+    manylinux = _table(data, 'manylinux', where='manifest')
+    _check_keys(manylinux, ('packages',), where='[manylinux]')
+    hooks_table = _table(data, 'hooks', where='manifest')
     unknown_hooks = set(hooks_table) - set(HOOK_NAMES)
     if unknown_hooks:
         msg = f'[hooks]: unknown hook(s) {sorted(unknown_hooks)}; expected {list(HOOK_NAMES)}.'
         raise ManifestError(msg)
+    hooks = {name: _str_list(hooks_table, name, where='[hooks]') for name in HOOK_NAMES}
+    for name, templates in hooks.items():
+        for template in templates:
+            _check_placeholders(template, PLACEHOLDERS, where=f'[hooks] {name}')
     return Manifest(
         name=_expect(backend, 'name', str, where='[backend]'),
-        import_name=_expect(backend, 'import_name', str, where='[backend]'),
+        import_name=_optional(backend, 'import_name', str, where='[backend]', default=None),
         default_ref=_expect(backend, 'default_ref', str, where='[backend]'),
-        url=backend.get('url'),
-        version_command=backend.get('version_command'),
+        url=_optional(backend, 'url', str, where='[backend]', default=None),
+        version_command=version_command,
         tools=dict(tools),
         cmake_common=_str_list(cmake, 'common', where='[cmake]'),
         cmake_os={name: _str_list(cmake, name, where='[cmake]') for name in OS_NAMES},
         init_cache=dict(init_cache),
         groups=groups,
         options=options,
-        hooks={name: _str_list(hooks_table, name, where='[hooks]') for name in HOOK_NAMES},
+        hooks=hooks,
         manylinux_packages=_str_list(manylinux, 'packages', where='[manylinux]'),
         path=path,
     )
@@ -409,10 +512,11 @@ def resolve_options(
     values: dict[str, bool | int | str] = {o.name: o.default for o in manifest.options.values()}
     for item in assignments or []:
         name, sep, raw = item.partition('=')
-        if not sep or name not in manifest.options:
-            msg = (
-                f'Unknown option {item!r}; use NAME=VALUE with one of {sorted(manifest.options)}.'
-            )
+        if name not in manifest.options:
+            msg = f'Unknown option {name!r}; available: {sorted(manifest.options)}.'
+            raise ManifestError(msg)
+        if not sep:
+            msg = f'Option {name!r} needs a value: write {name}=VALUE.'
             raise ManifestError(msg)
         values[name] = manifest.options[name].coerce(raw)
     return values
@@ -455,6 +559,41 @@ def cmake_entries(
         if entry is not None:
             entries.append(entry)
     return entries
+
+
+def cmake_unset(manifest: Manifest, os_name: str, *, groups: list[str]) -> list[str]:
+    """Return the cache keys a disabled group set without giving an off value.
+
+    Parameters
+    ----------
+    manifest : Manifest
+        Manifest to read.
+
+    os_name : str
+        Operating system the build runs on.
+
+    groups : list[str]
+        Enabled group names.
+
+    Returns
+    -------
+    list[str]
+        Keys of disabled groups without ``cmake_off`` that no enabled entry sets.
+
+    """
+    kept = {
+        e.partition('=')[0].partition(':')[0]
+        for e in cmake_entries(manifest, os_name, groups=groups, options={})
+    }
+    keys: list[str] = []
+    for group in manifest.groups_for(os_name):
+        if group.name in groups or group.cmake_off:
+            continue
+        for entry in group.cmake:
+            key = entry.partition('=')[0].partition(':')[0]
+            if key not in kept and key not in keys:
+                keys.append(key)
+    return keys
 
 
 def option_environment(manifest: Manifest, options: dict[str, bool | int | str]) -> dict[str, str]:

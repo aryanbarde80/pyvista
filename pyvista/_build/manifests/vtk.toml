@@ -1,7 +1,7 @@
 manifest_version = 1
 
 [backend]
-default_ref = "v9.7.0" # newest release inside the vtk pin in pyproject.toml
+default_ref = "v9.7.1" # newest VTK release
 import_name = "vtkmodules"
 name = "vtk"
 url = "https://gitlab.kitware.com/vtk/vtk.git"
@@ -90,5 +90,5 @@ os = ["linux"]
 [options.smp]
 choices = ["OpenMP", "STDThread", "Sequential", "TBB"]
 cmake = "VTK_SMP_IMPLEMENTATION_TYPE={value}"
-default = "STDThread" # what the PyPI wheels use; VTK's own default is Sequential
+default = "STDThread" # threaded; VTK's own default and PyPI wheels use Sequential
 help = "Threading backend for SMP-enabled filters"

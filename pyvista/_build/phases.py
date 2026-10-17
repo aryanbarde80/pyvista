@@ -16,15 +16,18 @@ import sys
 from typing import TYPE_CHECKING
 
 from rich.console import Console
-from rich.prompt import Confirm
-from rich.prompt import Prompt
+from rich.markup import escape
+from rich.prompt import Confirm as _RichConfirm
+from rich.prompt import Prompt as _RichPrompt
 from rich.table import Table
+from rich.text import Text
 
 from . import manylinux as _manylinux
 from . import tools as _tools
 from .manifest import MANIFEST_FILENAME
 from .manifest import ManifestError
 from .manifest import cmake_entries
+from .manifest import cmake_unset
 from .manifest import option_environment
 from .manifest import resolve_groups
 from .manifest import resolve_options
@@ -49,6 +52,40 @@ _NOISY_BUILD_LINE = re.compile(
 
 class BuildError(Exception):
     """A step cannot continue; the message tells the user what to do."""
+
+
+class Prompt(_RichPrompt):
+    """Text prompt whose question is printed verbatim.
+
+    Parameters
+    ----------
+    prompt : str, default: ''
+        Question text, shown as is.
+
+    **kwargs
+        Passed to the rich prompt.
+
+    """
+
+    def __init__(self, prompt: str = '', **kwargs) -> None:
+        super().__init__(Text(prompt, style='prompt'), **kwargs)
+
+
+class Confirm(_RichConfirm):
+    """Yes/no prompt whose question is printed verbatim.
+
+    Parameters
+    ----------
+    prompt : str, default: ''
+        Question text, shown as is.
+
+    **kwargs
+        Passed to the rich prompt.
+
+    """
+
+    def __init__(self, prompt: str = '', **kwargs) -> None:
+        super().__init__(Text(prompt, style='prompt'), **kwargs)
 
 
 @dataclass
@@ -76,6 +113,7 @@ class BuildConfig:
     version_suffix: str | None = None
     repair: bool = True
     install: bool = False
+    yes: bool = False
     interactive: bool = False
     dry_run: bool = False
     manylinux: str | None = None
@@ -113,7 +151,7 @@ class BuildConfig:
 
 
 class Builder:
-    """Run the phases in order, confirming each one with the user.
+    """Run the phases in order.
 
     Parameters
     ----------
@@ -129,8 +167,7 @@ class Builder:
         self.config = config
         self.console = console or Console()
         self.env: dict[str, str] = dict(os.environ)
-        scripts = str(Path(sys.executable).parent)
-        self.env['PATH'] = f'{scripts}{os.pathsep}{self.env.get("PATH", "")}'
+        self.env['PATH'] = f'{_tools.scripts_dir()}{os.pathsep}{self.env.get("PATH", "")}'
         self._manifest: Manifest | None = None
         self.groups: list[str] = []
         self.option_values: dict[str, bool | int | str] = {}
@@ -187,8 +224,33 @@ class Builder:
         if self.config.prompting:
             return Confirm.ask(question, default=default, console=self.console)
         if self.config.interactive:
-            self.say(f'[dim]{question} -> {"yes" if default else "no"} (dry run)[/dim]')
+            why = 'dry run' if self.config.dry_run else 'no terminal'
+            answer = 'yes' if default else 'no'
+            self.say(f'[dim]{escape(question)} -> {answer} ({why})[/dim]')
         return default
+
+    def confirm_installs(self, items: Sequence[str]) -> None:
+        """List everything the build will install and ask once; ``--yes`` answers yes.
+
+        Parameters
+        ----------
+        items : Sequence[str]
+            One line per thing to install, saying what and where.
+
+        """
+        if not items:
+            return
+        self.say('The build installs:')
+        for item in items:
+            self.say(f'  • {escape(item)}')
+        if self.config.yes or self.config.dry_run:
+            return
+        if not sys.stdin.isatty():
+            msg = 'Pass --yes to install these, or install them yourself and run again.'
+            raise BuildError(msg)
+        if not Confirm.ask('Install them?', default=True, console=self.console):
+            msg = 'Nothing was installed; install them yourself and run again.'
+            raise BuildError(msg)
 
     def run(
         self,
@@ -221,17 +283,22 @@ class Builder:
         """
         where = f' (in {cwd})' if cwd is not None else ''
         prefix = ''.join(f'{k}={shlex.quote(v)} ' for k, v in (env or {}).items())
-        self.say(f'[cyan]$ {prefix}{_join(cmd)}[/cyan]{where}')
+        self.say(f'[cyan]$ {escape(prefix + _join(cmd))}[/cyan]{escape(where)}')
         if self.config.dry_run:
             return
         if cwd is not None:
             cwd.mkdir(parents=True, exist_ok=True)
         full_env = dict(self.env)
         full_env.update(env or {})
-        if log is None:
-            status = subprocess.run(cmd, cwd=cwd, env=full_env, check=False).returncode
-        else:
-            status = self._run_logged(cmd, cwd=cwd, env=full_env, log=log)
+        resolved = [_tools.which(cmd[0], full_env), *cmd[1:]]
+        try:
+            if log is None:
+                status = subprocess.run(resolved, cwd=cwd, env=full_env, check=False).returncode
+            else:
+                status = self._run_logged(resolved, cwd=cwd, env=full_env, log=log)
+        except OSError as err:
+            msg = f'Cannot run {cmd[0]}: {err}'
+            raise BuildError(msg) from None
         if status != 0 and fatal:
             msg = f'Command failed with exit status {status}: {_join(cmd)}'
             raise BuildError(msg)
@@ -284,7 +351,7 @@ class Builder:
         cmd = ['git', *args]
         if capture:
             return subprocess.run(
-                cmd, cwd=cwd, capture_output=True, text=True, check=True
+                cmd, cwd=cwd, env=self.env, capture_output=True, text=True, check=True
             ).stdout.strip()
         self.run(cmd, cwd=cwd)
         return ''
@@ -328,14 +395,20 @@ class Builder:
             The final wheel, or ``None`` on a dry run.
 
         """
-        self.console.print(f'[bold green]Building backend: {self.config.backend}[/bold green]')
+        self.console.print(
+            f'[bold green]Building backend: {escape(self.config.backend)}[/bold green]'
+        )
         if self.config.manylinux:
             return self.build_in_manylinux()
         self.say(
-            'This walks through eight steps: source, tools, build options, configure, build, '
-            'wheel, repair, and install. Each step explains what it will do and asks before '
-            'running any command.'
+            'Eight steps: source, tools, build options, configure, build, wheel, repair, '
+            'and install.'
         )
+        if self.config.prompting:
+            self.say(
+                'Each step explains what it will do and asks before running any command; '
+                'Enter takes the default.'
+            )
         if not self.confirm('Proceed?'):
             msg = 'Stopped before the first step.'
             raise BuildError(msg)
@@ -354,9 +427,7 @@ class Builder:
         """Clone or reuse the checkout, then load its manifest."""
         cfg = self.config
         self.step('1/8 Source')
-        git = _tools.Tool(
-            'git', ('git',), instructions='Install git: https://git-scm.com/downloads'
-        )
+        git = _tools.git_tool()
         if not _tools.detect(git, self.env):
             msg = f'git was not found on PATH. {git.instructions}'
             raise BuildError(msg)
@@ -419,9 +490,13 @@ class Builder:
     def _existing_checkout(self, src: Path) -> None:
         """Apply ``--update`` / ``--ref`` to a checkout that already exists."""
         cfg = self.config
-        if not cfg.update and cfg.ref is None:
+        if not cfg.update and (cfg.ref is None or self._at_ref(src, cfg.ref)):
             return
-        dirty = self.git('status', '--porcelain', cwd=src, capture=True)
+        try:
+            dirty = self.git('status', '--porcelain', cwd=src, capture=True)
+        except subprocess.CalledProcessError as err:
+            msg = f'git status failed in {src}: {(err.stderr or "").strip()}'
+            raise BuildError(msg) from None
         if dirty:
             msg = f'{src} has local changes; commit or stash them before using --ref or --update.'
             raise BuildError(msg)
@@ -433,8 +508,17 @@ class Builder:
         if cfg.update or self.confirm(f'Check out {ref!r} in {src}?'):
             self.git('-c', 'advice.detachedHead=false', 'checkout', ref, cwd=src)
 
+    def _at_ref(self, src: Path, ref: str) -> bool:
+        """Return whether a checkout's HEAD is already the commit ``ref`` names."""
+        try:
+            head = self.git('rev-parse', 'HEAD', cwd=src, capture=True)
+            target = self.git('rev-parse', f'{ref}^{{commit}}', cwd=src, capture=True)
+        except subprocess.CalledProcessError:
+            return False
+        return head == target
+
     def phase_tools(self) -> None:
-        """Check for every tool, offering to install the pip-installable ones."""
+        """Check every tool, then install what is missing after one confirmation."""
         cfg = self.config
         self.step('2/8 Tools')
         tools = _tools.required_tools(cfg.os_name, self.manifest.tools, repair=cfg.repair)
@@ -473,26 +557,29 @@ class Builder:
             raise BuildError(msg)
 
         specs = [f'{t.pip}{t.spec}' for t in missing_pip] + missing_packages
-        if specs:
-            cmd = _tools.pip_install_command(*specs)
-            if cmd is None:
-                msg = (
-                    f'Install {", ".join(specs)} into {sys.prefix} and run again '
-                    '(no pip or uv found).'
-                )
-                raise BuildError(msg)
-            self.say(f'Missing Python packages: [bold]{", ".join(specs)}[/bold].')
-            if not self.confirm(f'Install them into {sys.prefix}?'):
-                msg = 'Cannot build without them.'
-                raise BuildError(msg)
+        cmd = _tools.pip_install_command(*specs) if specs else None
+        if specs and cmd is None:
+            msg = (
+                f'Install {", ".join(specs)} into {sys.prefix} and run again (no pip or uv found).'
+            )
+            raise BuildError(msg)
+        if cfg.install and _tools.pip_install_command() is None:
+            msg = '--install needs pip or uv in this environment.'
+            raise BuildError(msg)
+        nasm_script = self._nasm_script()
+        plan = self.install_plan(specs)
+        if nasm_script is not None:
+            plan.append(f"NASM into {self.nasm_dir}, with VTK's {nasm_script.name}")
+        self.confirm_installs(plan)
+        if cmd is not None:
             self.run(cmd)
             if not cfg.dry_run:
                 bad = [t.label for t in missing_pip if not _tools.detect(t, self.env)]
                 if bad:
                     msg = f'Still not usable after install: {", ".join(bad)}.'
                     raise BuildError(msg)
-
-        self._activate_nasm()
+        if nasm_script is not None:
+            self._install_nasm(nasm_script)
         self._activate_compiler_cache()
 
     def _activate_msvc(self, tools: list[_tools.Tool]) -> None:
@@ -511,29 +598,36 @@ class Builder:
         if self.confirm('Use it?') and not self.config.dry_run:
             self.env = _tools.msvc_environment(vcvarsall, env=self.env)
 
-    def _activate_nasm(self) -> None:
-        """On Windows, fetch NASM with VTK's own script when it is missing."""
+    @property
+    def nasm_dir(self) -> Path:  # numpydoc ignore=RT01
+        """Where VTK's download script puts NASM."""
+        return self.config.src_dir / '.gitlab' / 'nasm'
+
+    def _nasm_script(self) -> Path | None:
+        """Return VTK's NASM download script on Windows when no NASM is usable, else ``None``."""
         cfg = self.config
         if cfg.os_name != 'windows':
-            return
-        nasm = _tools.Tool('nasm', ('nasm',))
-        if _tools.detect(nasm, self.env):
-            return
+            return None
+        if self.nasm_dir.is_dir():
+            self.env['PATH'] = f'{self.nasm_dir}{os.pathsep}{self.env.get("PATH", "")}'
+        if _tools.detect(_tools.Tool('nasm', ('nasm',)), self.env):
+            return None
         script = cfg.src_dir / '.gitlab' / 'ci' / 'download_nasm.cmake'
         if not script.is_file():
             self.say(
                 '[yellow]nasm not found; assembler-optimised codecs will be disabled.[/yellow]'
             )
-            return
-        target = cfg.src_dir / '.gitlab' / 'nasm'
-        self.say(f'nasm not found; VTK can download it into [bold]{target}[/bold].')
-        if self.confirm('Download nasm?'):
-            self.run(
-                ['cmake', '-P', str(script)],
-                cwd=cfg.src_dir,
-                env={'CMAKE_CONFIGURATION': 'windows'},
-            )
-            self.env['PATH'] = f'{target}{os.pathsep}{self.env.get("PATH", "")}'
+            return None
+        return script
+
+    def _install_nasm(self, script: Path) -> None:
+        """Download NASM with VTK's script and put it on the build PATH."""
+        self.run(
+            ['cmake', '-P', str(script)],
+            cwd=self.config.src_dir,
+            env={'CMAKE_CONFIGURATION': 'windows'},
+        )
+        self.env['PATH'] = f'{self.nasm_dir}{os.pathsep}{self.env.get("PATH", "")}'
 
     def _compiler_cache_row(self) -> tuple[str, str, str]:
         """Return the tools-table row for the ``--compiler-cache`` choice."""
@@ -577,6 +671,25 @@ class Builder:
             if base != Path(base.anchor):
                 self.env.setdefault('CCACHE_BASEDIR', str(base))
                 self.env.setdefault('CCACHE_NOHASHDIR', '1')
+
+    def install_plan(self, specs: Sequence[str]) -> list[str]:
+        """Return one line per thing the build installs.
+
+        Parameters
+        ----------
+        specs : Sequence[str]
+            Missing Python packages with their version requirements.
+
+        Returns
+        -------
+        list[str]
+            What gets installed, and where.
+
+        """
+        items = [f'{spec} into {sys.prefix}' for spec in specs]
+        if self.config.install:
+            items.append(f'the {self.config.backend} wheel into {sys.prefix}, once it is built')
+        return items
 
     def phase_groups(self) -> None:
         """Resolve the groups and options and show them."""
@@ -639,6 +752,9 @@ class Builder:
             except subprocess.CalledProcessError as err:
                 msg = f'version_command failed with exit status {err.returncode}: {err.stderr}'
                 raise BuildError(msg) from None
+            except OSError as err:
+                msg = f'Cannot run version_command {command[0]}: {err}'
+                raise BuildError(msg) from None
             return out.strip() or None
         if not (cfg.src_dir / '.git').exists():
             ref = cfg.ref or self.manifest.default_ref
@@ -673,6 +789,7 @@ class Builder:
         """
         cfg = self.config
         cmd = ['cmake', '-Wno-dev', '-S', str(cfg.src_dir), '-B', str(cfg.cmake_dir), '-GNinja']
+        cmd += [f'-U{key}' for key in cmake_unset(self.manifest, cfg.os_name, groups=self.groups)]
         init_cache = self.manifest.init_cache.get(cfg.os_name)
         if init_cache:
             cmd += ['-C', str(cfg.src_dir / init_cache)]
@@ -705,51 +822,67 @@ class Builder:
         """
         return option_environment(self.manifest, self.option_values)
 
-    def _state(self) -> dict[str, object]:
-        """Return what the configure step depends on, for change detection between runs."""
-        return {
-            'groups': self.groups,
-            'options': self.option_values,
-            'defines': self.config.defines,
-            'build_type': self.config.build_type,
-            'version_suffix': self.version_suffix(),
-        }
+    def _stored_state(self) -> object:
+        """Return the configure state saved by the last run, or ``None`` when unreadable."""
+        state_file = self.config.cmake_dir / STATE_FILENAME
+        try:
+            return json.loads(state_file.read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            return None
 
     def phase_configure(self) -> None:
         """Run cmake, or skip it when the tree is already configured the same way."""
         cfg = self.config
         self.step('4/8 Configure')
-        state_file = cfg.cmake_dir / STATE_FILENAME
         if cfg.clean and cfg.cmake_dir.exists():
             self.say(f'--clean removes [bold]{cfg.cmake_dir}[/bold].')
             if self.confirm('Delete it?') and not cfg.dry_run:
                 shutil.rmtree(cfg.cmake_dir)
+        cmd = self.configure_command()
+        env = self.configure_env()
+        state = {'command': cmd, 'env': env}
         configured = (cfg.cmake_dir / 'CMakeCache.txt').exists()
-        changed = configured and (
-            not state_file.is_file() or json.loads(state_file.read_text()) != self._state()
-        )
-        if configured and not cfg.reconfigure and not changed:
+        stored = self._stored_state() if configured else None
+        if configured and not cfg.reconfigure and stored == state:
             self.say(
                 f'[bold]{cfg.cmake_dir}[/bold] is already configured; skipping '
                 '(use --reconfigure).'
             )
             return
-        if changed:
-            self.say('The build options differ from the last configure.')
-            if not self.confirm('Reconfigure with the new options?'):
-                msg = 'Keeping the old configuration; run again without changing the options.'
-                raise BuildError(msg)
+        if configured and stored != state:
+            if self._only_version_changed(stored, cmd, env):
+                self.say('The source is at a new commit, so the version suffix changes.')
+            else:
+                self.say('The configure command differs from the one this tree was set up with.')
+                if not self.confirm('Reconfigure?'):
+                    msg = 'Stopped; the build tree keeps its earlier configuration.'
+                    raise BuildError(msg)
         self.say(
             f'Build type [bold]{cfg.build_type}[/bold], build tree [bold]{cfg.cmake_dir}[/bold].'
         )
         if not self.confirm('Run cmake?'):
             msg = 'Stopped before configure.'
             raise BuildError(msg)
-        self.run(self.configure_command(), env=self.configure_env())
+        self.run(cmd, env=env)
         if not cfg.dry_run:
+            state_file = cfg.cmake_dir / STATE_FILENAME
             state_file.parent.mkdir(parents=True, exist_ok=True)
-            state_file.write_text(json.dumps(self._state(), indent=2))
+            state_file.write_text(json.dumps(state, indent=2), encoding='utf-8')
         self.hooks('post_configure')
+
+    @staticmethod
+    def _only_version_changed(stored: object, cmd: list[str], env: dict[str, str]) -> bool:
+        """Return whether a stored state differs from this one only in the version suffix."""
+        if not isinstance(stored, dict) or stored.get('env') != env:
+            return False
+        old = stored.get('command')
+        if not isinstance(old, list) or len(old) != len(cmd):
+            return False
+        prefix = '-DVTK_VERSION_SUFFIX='
+        return all(
+            a == b or (str(a).startswith(prefix) and b.startswith(prefix))
+            for a, b in zip(old, cmd, strict=True)
+        )
 
     def phase_build(self) -> None:
         """Compile with ninja through cmake."""
@@ -937,7 +1070,7 @@ class Builder:
             f'Install {wheel.name} into {sys.prefix}?', default=False
         )
         if not wanted:
-            self.say(f'Not installed. To install later:\n  [cyan]{shlex.join(cmd)}[/cyan]')
+            self.say(f'Not installed. To install later:\n  [cyan]{escape(_join(cmd))}[/cyan]')
             return
         self.run(cmd)
 
