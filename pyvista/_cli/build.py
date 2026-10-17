@@ -8,6 +8,7 @@ from typing import Annotated
 from typing import Literal
 
 from cyclopts import Parameter
+from rich.markup import escape
 
 import pyvista as pv
 from pyvista._build import BuildConfig
@@ -53,7 +54,8 @@ def _build(
         Parameter(help='Existing source checkout to build instead of cloning.'),
     ] = None,
     url: Annotated[
-        str | None, Parameter(help='Git URL to clone, for a backend PyVista does not know.')
+        str | None,
+        Parameter(help="Git URL to clone instead of the backend's own, such as a fork."),
     ] = None,
     with_: Annotated[
         list[str] | None,
@@ -96,7 +98,11 @@ def _build(
         bool, Parameter(negative='', help='Run cmake again even if the tree is configured.')
     ] = False,
     update: Annotated[
-        bool, Parameter(negative='', help='Fetch and check out ``--ref`` in an existing checkout.')
+        bool,
+        Parameter(
+            negative='',
+            help='Fetch, then check out ``--ref`` (or the release tag) in an existing checkout.',
+        ),
     ] = False,
     compiler_cache: Annotated[
         Literal['auto', 'ccache', 'sccache', 'none'],
@@ -104,7 +110,10 @@ def _build(
     ] = 'auto',
     cache_dir: Annotated[
         Path | None,
-        Parameter(help='Compiler cache directory. Defaults to ``<build-dir>/compiler-cache``.'),
+        Parameter(
+            help='Compiler cache directory. Defaults to ``$CCACHE_DIR`` or ``$SCCACHE_DIR`` '
+            'when set, else ``<build-dir>/compiler-cache``.'
+        ),
     ] = None,
     build_dir: Annotated[
         Path | None,
@@ -122,7 +131,15 @@ def _build(
         bool, Parameter(help='Bundle shared libraries into the wheel (``--no-repair`` to skip).')
     ] = True,
     install: Annotated[
-        bool, Parameter(help='Install the wheel into this environment without asking.')
+        bool, Parameter(help='Install the built wheel into this environment.')
+    ] = False,
+    yes: Annotated[
+        bool,
+        Parameter(
+            name=['--yes', '-y'],
+            negative='',
+            help='Install what the build needs without asking; the list is still printed.',
+        ),
     ] = False,
     manylinux: Annotated[
         bool,
@@ -149,10 +166,11 @@ def _build(
 ) -> None:
     """Build a VTK backend wheel from source.
 
-    Builds with the defaults and prints every command as it runs. ``--interactive`` walks
-    through the steps, showing each setting and asking before running anything, and
-    ``--dry-run`` prints the commands without running them. ``--manylinux`` runs the build
-    inside a manylinux container so the Linux wheel installs on any machine.
+    Builds with the defaults and prints every command as it runs. Anything the build has to
+    install is listed first and confirmed once; ``--yes`` skips that question.
+    ``--interactive`` walks through the steps, showing each setting and asking before running
+    anything, and ``--dry-run`` prints the commands without running them. ``--manylinux``
+    runs the build inside a manylinux container so the Linux wheel installs on any machine.
     """
     if backend is None:
         backend = os.environ.get(BACKEND_ENV_VAR)
@@ -166,6 +184,8 @@ def _build(
         backend = 'vtk'
     if source is not None and url is not None:
         print_error_and_exit('--source and --url are mutually exclusive.')
+    if manylinux_image is not None and not manylinux:
+        print_error_and_exit('--manylinux-image needs --manylinux.')
     config = BuildConfig(
         backend=backend,
         build_dir=(build_dir or Path(f'{backend}-build')).resolve(),
@@ -188,6 +208,7 @@ def _build(
         version_suffix=version_suffix,
         repair=repair,
         install=install,
+        yes=yes,
         interactive=interactive,
         dry_run=dry_run,
         manylinux=(manylinux_image or default_image()) if manylinux else None,
@@ -195,7 +216,7 @@ def _build(
     try:
         Builder(config, console=CLI_APP.console).build()
     except (BuildError, ManifestError) as err:
-        print_error_and_exit(str(err), title='PyVista build stopped')
-    except KeyboardInterrupt:
+        print_error_and_exit(escape(str(err)), title='PyVista build stopped')
+    except (KeyboardInterrupt, EOFError):
         CLI_APP.console.print('\n[dim]Stopped.[/dim]')
         raise SystemExit(130) from None

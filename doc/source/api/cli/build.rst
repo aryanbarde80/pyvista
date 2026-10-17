@@ -33,7 +33,14 @@ fork (see :ref:`vtk_backend_install`), or your own fork of VTK:
 .. code-block:: bash
 
     pyvista build cvista
-    pyvista build myfork --url https://github.com/me/vtk.git --ref my-branch
+    pyvista build vtk --url https://github.com/me/vtk.git --ref my-branch
+
+Install whatever the build is missing without being asked, for scripts and CI.
+The list of what gets installed is still printed:
+
+.. code-block:: bash
+
+    pyvista build vtk --yes
 
 Build VTK's ``master`` branch, or any tag or commit:
 
@@ -69,15 +76,14 @@ Build a portable Linux wheel inside a manylinux container (needs Docker, see
 
     pyvista build vtk --manylinux
 
-Print the commands a build would run without running any of them. With
-``--interactive`` each question is shown with the answer it would take, which
-is the quickest way to see what the eight steps do:
+Print the commands a build would run without running any of them, which is the
+quickest way to see what the eight steps do:
 
 .. code-block:: bash
 
-    pyvista build vtk --interactive --dry-run
+    pyvista build vtk --dry-run
 
-.. command-output:: COLUMNS=100 pyvista build vtk --interactive --dry-run --build-dir vtk-build
+.. command-output:: COLUMNS=100 pyvista build vtk --dry-run --build-dir vtk-build
    :shell:
 
 API Reference

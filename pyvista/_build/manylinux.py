@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from importlib.metadata import requires
 import os
 from pathlib import Path
 import platform
 import shlex
 import sys
 from typing import TYPE_CHECKING
+
+from packaging.requirements import Requirement
 
 import pyvista as pv
 
@@ -22,10 +25,16 @@ IMAGES = {
 WORK = '/work'
 SOURCE = '/src'
 CACHE = '/cache'
-PYVISTA = '/pyvista'
+PYVISTA_ROOT = '/opt/pyvista-host'
 CCACHE_VERSION = '4.14'
-CCACHE_SHA256 = '888eaf9697919d6eba77be797e9d9c9e40e734d11d67d25a79b075c3f79f6c77'
+CCACHE_SHA256 = {
+    'x86_64': '888eaf9697919d6eba77be797e9d9c9e40e734d11d67d25a79b075c3f79f6c77',
+    'aarch64': '40623f11012a97d60c7d90058d7e3c8c70a3802af53a34067b89e6345c89db69',
+}
 DOCKER_INSTRUCTIONS = 'Install Docker: https://docs.docker.com/get-docker/'
+_HOST_PATH_VARS = frozenset(
+    {'CCACHE_BASEDIR', 'CCACHE_CONFIGPATH', 'CCACHE_DIR', 'CCACHE_LOGFILE', 'SCCACHE_DIR'}
+)
 
 
 def host_arch() -> str:
@@ -66,47 +75,37 @@ def container_python() -> str:
     return f'/opt/python/{tag}-{tag}/bin/python'
 
 
-def pyvista_source() -> Path | None:
-    """Return the PyVista source tree the running package was installed from, if any.
+def pyvista_package() -> Path:
+    """Return the directory of the running ``pyvista`` package.
 
     Returns
     -------
-    Path or None
-        Checkout root when PyVista runs from an editable install, else ``None``.
+    Path
+        Package directory, mounted read-only into the container.
 
     """
-    root = Path(pv.__file__).resolve().parent.parent
-    if (root / 'pyproject.toml').is_file() and (root / 'pyvista' / '__init__.py').is_file():
-        return root
-    return None
+    return Path(pv.__file__).resolve().parent
 
 
-def pyvista_requirement(source: Path | None) -> str:
-    """Return what ``pip install`` gets inside the container to provide PyVista.
-
-    Parameters
-    ----------
-    source : Path or None
-        Host checkout mounted at :data:`PYVISTA`, or ``None`` to install a release.
+def pyvista_requirements() -> list[str]:
+    """Return PyVista's runtime requirements, without the optional extras.
 
     Returns
     -------
-    str
-        Requirement string or container path.
+    list[str]
+        Requirement strings for ``pip install`` inside the container.
 
     """
-    if source is not None:
-        return PYVISTA
-    version = pv.__version__
-    return 'pyvista' if 'dev' in version else f'pyvista=={version}'
+    names = requires('pyvista') or []
+    return [r for r in names if 'extra' not in str(Requirement(r).marker or '')]
 
 
 def container_script(
     *,
     python: str,
     packages: Sequence[str],
-    pyvista: str,
-    build_args: Sequence[str],
+    requirements: Sequence[str],
+    config: str,
     ccache: bool,
     owner: str | None,
     paths: Sequence[str],
@@ -121,14 +120,14 @@ def container_script(
     packages : Sequence[str]
         System packages to install with ``dnf`` or ``yum``.
 
-    pyvista : str
-        Requirement or path that ``pip install`` gets PyVista from.
+    requirements : Sequence[str]
+        Python packages PyVista needs at run time.
 
-    build_args : Sequence[str]
-        Arguments after ``pyvista build``.
+    config : str
+        JSON build configuration passed to ``python -m pyvista._build``.
 
     ccache : bool
-        Whether to install a static ``ccache`` (x86_64 images only).
+        Whether to install a static ``ccache``.
 
     owner : str or None
         ``uid:gid`` to hand the written files back to, or ``None`` to leave them.
@@ -142,8 +141,10 @@ def container_script(
         Bash script.
 
     """
-    lines = [
-        'set -euo pipefail',
+    lines = ['set -euo pipefail']
+    if owner is not None and paths:
+        lines.append(f"trap 'chown -R {owner} {' '.join(paths)}' EXIT")
+    lines += [
         f'PY={shlex.quote(python)}',
         'if ! test -x "$PY"; then echo "$PY is not in this image" >&2; exit 1; fi',
         "git config --global --add safe.directory '*'",
@@ -155,21 +156,22 @@ def container_script(
             f'dnf install -y --setopt=install_weak_deps=False {pkgs}; '
             f'else yum install -y {pkgs}; fi'
         )
-    if ccache and host_arch() == 'x86_64':
-        name = f'ccache-{CCACHE_VERSION}-linux-x86_64-musl-static'
+    if ccache:
+        name = f'ccache-{CCACHE_VERSION}-linux-$ARCH-musl-static'
         url = f'https://github.com/ccache/ccache/releases/download/v{CCACHE_VERSION}/{name}.tar.xz'
+        cases = ' '.join(f'{arch}) SHA={sha};;' for arch, sha in CCACHE_SHA256.items())
         lines += [
-            f'curl -sSfL -o /tmp/ccache.tar.xz {url}',
-            f'echo "{CCACHE_SHA256}  /tmp/ccache.tar.xz" | sha256sum --check --quiet',
-            f'tar -xJf /tmp/ccache.tar.xz -C /usr/local/bin --strip-components=1 {name}/ccache',
+            'ARCH=$(uname -m)',
+            f'case "$ARCH" in {cases} *) echo "no static ccache for $ARCH" >&2; exit 1;; esac',
+            f'curl -sSfL -o /tmp/ccache.tar.xz "{url}"',
+            'echo "$SHA  /tmp/ccache.tar.xz" | sha256sum --check --quiet',
+            f'tar -xJf /tmp/ccache.tar.xz -C /usr/local/bin --strip-components=1 "{name}/ccache"',
         ]
+    reqs = ' '.join(shlex.quote(r) for r in requirements)
     lines += [
-        '"$PY" -m pip install --quiet --upgrade pip',
-        f'"$PY" -m pip install --quiet --only-binary :all: {shlex.quote(pyvista)}',
-        f'"$PY" -m pyvista build {shlex.join(build_args)}',
+        f'"$PY" -m pip install --quiet --root-user-action=ignore --only-binary :all: {reqs}',
+        f'PYTHONPATH={PYVISTA_ROOT} "$PY" -m pyvista._build {shlex.quote(config)}',
     ]
-    if owner is not None and paths:
-        lines.append(f'chown -R {owner} {" ".join(paths)}')
     return '\n'.join(lines)
 
 
@@ -189,7 +191,7 @@ def docker_command(
         Image to run.
 
     mounts : Mapping[str, Path]
-        Container path to host directory.
+        Container path to host directory. The PyVista package is mounted read-only.
 
     script : str
         Script passed to ``bash -c`` inside the container.
@@ -198,7 +200,7 @@ def docker_command(
         Attach a terminal so the build inside can ask questions.
 
     env : Mapping[str, str]
-        Host environment; ``CCACHE_*`` and ``SCCACHE_*`` variables are passed through.
+        Host environment; its non-path ``CCACHE_*`` and ``SCCACHE_*`` settings pass through.
 
     Returns
     -------
@@ -206,13 +208,14 @@ def docker_command(
         Command and arguments.
 
     """
-    cmd = ['docker', 'run', '--rm', '-i']
+    cmd = ['docker', 'run', '--rm', '--init', '-i']
     if interactive:
         cmd.append('-t')
     for inside, outside in mounts.items():
-        cmd += ['--volume', f'{outside}:{inside}']
+        mode = ':ro' if inside.startswith(PYVISTA_ROOT) else ''
+        cmd += ['--volume', f'{outside}:{inside}{mode}']
     for name in sorted(env):
-        if name.startswith(('CCACHE_', 'SCCACHE_')):
+        if name.startswith(('CCACHE_', 'SCCACHE_')) and name not in _HOST_PATH_VARS:
             cmd += ['--env', name]
     cmd += ['--workdir', WORK, image, 'bash', '-c', script]
     return cmd
