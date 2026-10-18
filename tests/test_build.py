@@ -293,17 +293,29 @@ def test_dry_run_commands(tmp_path: Path, os_name):
     assert 'checkout v9.7.0' in out
     assert '-DFOO=1' in out
     assert '-DVTK_VERSION_SUFFIX= ' in out
-    repairer = {
-        'linux': 'auditwheel repair',
-        'macos': 'delocate-wheel',
-        'windows': 'delvewheel repair',
-    }
-    assert repairer[os_name] in out
+    configure = next(line for line in out.splitlines() if ' -GNinja' in line)
+    assert ('_PYTHON_HOST_PLATFORM=macosx-11.0-' in configure) == (os_name == 'macos')
+    assert ('delvewheel repair' in out) == (os_name == 'windows')
+    assert ('Skipped. --repair' in out) == (os_name != 'windows')
     assert 'setup.py bdist_wheel' in out
     assert '--force-reinstall' in out  # printed as the install hint
     launcher = 'sccache' if os_name == 'windows' else 'ccache'
     assert f'-DCMAKE_CXX_COMPILER_LAUNCHER={launcher}' in out
     assert f'$ {launcher} --show-stats' in out
+
+
+@pytest.mark.parametrize(
+    ('os_name', 'repair', 'expected'),
+    [
+        ('linux', None, False),
+        ('macos', None, False),
+        ('windows', None, True),
+        ('linux', True, True),
+        ('windows', False, False),
+    ],
+)
+def test_repair_default(tmp_path: Path, os_name, repair, expected):
+    assert _config(tmp_path, os_name=os_name, repair=repair).repairs is expected
 
 
 @pytest.mark.usefixtures('no_tools')
@@ -329,7 +341,7 @@ def test_dry_run_flags(tmp_path: Path):
     assert '-DVTK_GROUP_ENABLE_Rendering=NO' in out
     assert '-DVTK_SMP_IMPLEMENTATION_TYPE=TBB' in out
     assert '-DVTK_VERSION_SUFFIX= ' in out
-    assert 'Skipped (--no-repair)' in out
+    assert 'Skipped. --repair' in out
 
 
 @pytest.mark.usefixtures('no_tools')
@@ -376,7 +388,7 @@ def test_pip_tools_offered(tmp_path: Path, mocker: MockerFixture):
         tools, 'pip_install_command', side_effect=lambda *s, args=(): ['pip', 'install', *args, *s]
     )
     console = Console(record=True, width=4000, force_terminal=False)
-    Builder(_config(tmp_path), console).build()
+    Builder(_config(tmp_path, repair=True), console).build()
     out = console.export_text()
     bullets = [f'  • {spec} into {sys.prefix}' for spec in ('cmake>=3.22', 'auditwheel', 'wheel')]
     assert '\n'.join(['The build installs:', *bullets]) in out
@@ -951,7 +963,7 @@ def test_disabled_groups_unset_their_keys(tmp_path: Path, mocker: MockerFixture,
 
 
 def test_build_wheel_repair_install_paths(tmp_path: Path, mocker: MockerFixture):
-    builder = _builder(tmp_path, mocker)
+    builder = _builder(tmp_path, mocker, repair=True)
     mocker.patch.object(builder, 'confirm', return_value=False)
     with pytest.raises(BuildError, match='Stopped before building'):
         builder.phase_build()
@@ -964,7 +976,7 @@ def test_build_wheel_repair_install_paths(tmp_path: Path, mocker: MockerFixture)
     with pytest.raises(BuildError, match='No wheel found'):
         builder._newest_wheel(tmp_path)
 
-    builder = _builder(tmp_path, mocker, install=True)
+    builder = _builder(tmp_path, mocker, install=True, repair=True)
     run = mocker.patch.object(builder, 'run')
     cfg = builder.config
     cfg.dist_dir.mkdir(parents=True)

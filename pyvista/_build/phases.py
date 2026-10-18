@@ -111,13 +111,20 @@ class BuildConfig:
     compiler_cache: str = 'auto'
     cache_dir: Path | None = None
     version_suffix: str | None = None
-    repair: bool = True
+    repair: bool | None = None
     install: bool = False
     yes: bool = False
     interactive: bool = False
     dry_run: bool = False
     manylinux: str | None = None
     os_name: str = field(default_factory=_tools.host_os)
+
+    @property
+    def repairs(self) -> bool:  # numpydoc ignore=RT01
+        """Whether to repair the wheel: ``repair`` when set, else on Windows or for manylinux."""
+        if self.repair is not None:
+            return self.repair
+        return self.os_name == 'windows' or self.manylinux is not None
 
     @property
     def src_dir(self) -> Path:  # numpydoc ignore=RT01
@@ -521,7 +528,7 @@ class Builder:
         """Check every tool, then install what is missing after one confirmation."""
         cfg = self.config
         self.step('2/8 Tools')
-        tools = _tools.required_tools(cfg.os_name, self.manifest.tools, repair=cfg.repair)
+        tools = _tools.required_tools(cfg.os_name, self.manifest.tools, repair=cfg.repairs)
         self._activate_msvc(tools)
         table = Table(show_header=True, header_style='bold purple')
         table.add_column('Tool')
@@ -835,7 +842,7 @@ class Builder:
         return cmd
 
     def configure_env(self) -> dict[str, str]:
-        """Return the environment variables the manifest options export to cmake.
+        """Return the environment cmake runs in: the manifest options and the wheel platform.
 
         Returns
         -------
@@ -843,7 +850,7 @@ class Builder:
             Variable name to value.
 
         """
-        return option_environment(self.manifest, self.option_values)
+        return {**option_environment(self.manifest, self.option_values), **self.wheel_env()}
 
     def _stored_state(self) -> object:
         """Return the configure state saved by the last run, or ``None`` when unreadable."""
@@ -1043,12 +1050,12 @@ class Builder:
         """Bundle the shared libraries into the wheel."""
         cfg = self.config
         self.step('7/8 Repair')
-        if not cfg.repair:
-            self.say('Skipped (--no-repair). The wheel only works while the build tree exists.')
+        if not cfg.repairs:
+            self.say('Skipped. --repair bundles the system libraries the wheel links against.')
             return
         self.say(
-            'Repairing copies the VTK shared libraries into the wheel so it installs anywhere, '
-            'not just next to this build tree.'
+            'Repairing bundles the libraries the wheel links against from outside it, '
+            'so it installs on other machines.'
         )
         if cfg.os_name == 'linux':
             self.say(
@@ -1159,7 +1166,7 @@ class Builder:
                     folder.mkdir(parents=True, exist_ok=True)
         self.run(cmd)
         if not cfg.dry_run:
-            self.wheel = self._newest_wheel(cfg.wheelhouse if cfg.repair else cfg.dist_dir)
+            self.wheel = self._newest_wheel(cfg.wheelhouse if cfg.repairs else cfg.dist_dir)
         if cfg.os_name == 'linux':
             self.phase_install()
         else:
@@ -1195,7 +1202,7 @@ class Builder:
             'clean': cfg.clean,
             'reconfigure': cfg.reconfigure,
             'version_suffix': cfg.version_suffix,
-            'repair': cfg.repair,
+            'repair': cfg.repairs,
             'install': False,
             'yes': True,
             'interactive': cfg.prompting,
