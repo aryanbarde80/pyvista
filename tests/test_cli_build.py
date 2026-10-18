@@ -182,7 +182,7 @@ def test_interactive_configure_flags(tmp_path: Path, mocker: MockerFixture):
 def test_interactive_configure_walk(tmp_path: Path, mocker: MockerFixture):
     """Answering n at the configure prompt asks for each setting in turn."""
     mocker.patch.object(phases.sys.stdin, 'isatty', return_value=True)
-    answers = iter(['y', 'y', 'n', 'RelWithDebInfo', 'none', 'dev0+gfeed', 'A=1 B=2', 'y'])
+    answers = iter(['y', 'y', 'n', 'RelWithDebInfo', 'ccache', 'dev0+gfeed', 'A=1 B=2', 'y'])
     mocker.patch.object(phases.Prompt, 'ask', side_effect=lambda *_, **__: next(answers))
     builder = Builder(_config(tmp_path, dry_run=False, interactive=True), Console(quiet=True))
     run = mocker.patch.object(builder, 'run')
@@ -194,7 +194,9 @@ def test_interactive_configure_walk(tmp_path: Path, mocker: MockerFixture):
     assert '-DCMAKE_BUILD_TYPE=RelWithDebInfo' in cmd
     assert '-DVTK_VERSION_SUFFIX=dev0+gfeed' in cmd
     assert cmd[-2:] == ['-DA=1', '-DB=2']
-    assert builder.launcher is None
+    assert builder.launcher is not None
+    assert builder.launcher.name == 'ccache'
+    assert '-DCMAKE_CXX_COMPILER_LAUNCHER=ccache' in cmd
 
 
 @pytest.mark.usefixtures('no_tools')

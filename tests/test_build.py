@@ -121,7 +121,6 @@ def test_vtk_manifest_defaults_match_ci_flags(os_name):
         'VTK_DISPATCH_SOA_ARRAYS=ON',
         'VTK_WRAP_SERIALIZATION=ON',
         'VTK_BUILD_PYI_FILES=ON',
-        'VTK_JPEG_ENABLE_SIMD=ON',
         'VTK_MODULE_ENABLE_VTK_FiltersParallelDIY2=YES',
         'VTK_MODULE_ENABLE_VTK_RenderingMatplotlib=YES',
         'VTK_MODULE_ENABLE_VTK_IOImport=YES',
@@ -286,7 +285,10 @@ def no_tools(mocker: MockerFixture):
 @pytest.mark.parametrize('os_name', OS_NAMES)
 def test_dry_run_commands(tmp_path: Path, os_name):
     console = Console(record=True, width=4000, force_terminal=False)
-    builder = Builder(_config(tmp_path, os_name=os_name, defines=['FOO=1'], ref='v9.7.0'), console)
+    cfg = _config(
+        tmp_path, os_name=os_name, defines=['FOO=1'], ref='v9.7.0', compiler_cache='auto'
+    )
+    builder = Builder(cfg, console)
     assert builder.build() is None
     out = console.export_text()
     assert out.startswith('Building backend: vtk')
@@ -294,17 +296,29 @@ def test_dry_run_commands(tmp_path: Path, os_name):
     assert 'checkout v9.7.0' in out
     assert '-DFOO=1' in out
     assert '-DVTK_VERSION_SUFFIX= ' in out
-    repairer = {
-        'linux': 'auditwheel repair',
-        'macos': 'delocate-wheel',
-        'windows': 'delvewheel repair',
-    }
-    assert repairer[os_name] in out
+    configure = next(line for line in out.splitlines() if ' -GNinja' in line)
+    assert ('_PYTHON_HOST_PLATFORM=macosx-11.0-' in configure) == (os_name == 'macos')
+    assert ('delvewheel repair' in out) == (os_name == 'windows')
+    assert ('Skipped. --repair' in out) == (os_name != 'windows')
     assert 'setup.py bdist_wheel' in out
     assert '--force-reinstall' in out  # printed as the install hint
     launcher = 'sccache' if os_name == 'windows' else 'ccache'
     assert f'-DCMAKE_CXX_COMPILER_LAUNCHER={launcher}' in out
     assert f'$ {launcher} --show-stats' in out
+
+
+@pytest.mark.parametrize(
+    ('os_name', 'repair', 'expected'),
+    [
+        ('linux', None, False),
+        ('macos', None, False),
+        ('windows', None, True),
+        ('linux', True, True),
+        ('windows', False, False),
+    ],
+)
+def test_repair_default(tmp_path: Path, os_name, repair, expected):
+    assert _config(tmp_path, os_name=os_name, repair=repair).repairs is expected
 
 
 @pytest.mark.usefixtures('no_tools')
@@ -313,7 +327,6 @@ def test_dry_run_flags(tmp_path: Path):
     cfg = _config(
         tmp_path,
         minimal=True,
-        compiler_cache='none',
         repair=False,
         build_type='Debug',
         jobs=3,
@@ -330,7 +343,7 @@ def test_dry_run_flags(tmp_path: Path):
     assert '-DVTK_GROUP_ENABLE_Rendering=NO' in out
     assert '-DVTK_SMP_IMPLEMENTATION_TYPE=TBB' in out
     assert '-DVTK_VERSION_SUFFIX= ' in out
-    assert 'Skipped (--no-repair)' in out
+    assert 'Skipped. --repair' in out
 
 
 @pytest.mark.usefixtures('no_tools')
@@ -377,7 +390,7 @@ def test_pip_tools_offered(tmp_path: Path, mocker: MockerFixture):
         tools, 'pip_install_command', side_effect=lambda *s, args=(): ['pip', 'install', *args, *s]
     )
     console = Console(record=True, width=4000, force_terminal=False)
-    Builder(_config(tmp_path), console).build()
+    Builder(_config(tmp_path, repair=True), console).build()
     out = console.export_text()
     bullets = [f'  • {spec} into {sys.prefix}' for spec in ('cmake>=3.22', 'auditwheel', 'wheel')]
     assert '\n'.join(['The build installs:', *bullets]) in out
@@ -799,14 +812,12 @@ def test_confirm_installs(tmp_path: Path, mocker: MockerFixture, kwargs, tty, an
     assert console.export_text() == 'The build installs:\n  • ninja into /env\n'
 
 
-def test_windows_msvc_and_nasm(tmp_path: Path, mocker: MockerFixture):
+def test_windows_msvc(tmp_path: Path, mocker: MockerFixture):
     present = {'git', 'cmake', 'ninja', 'delvewheel'}
 
     def which(name, path=None, **_):
         if name == 'cl':
             return 'C:/vs/cl' if path and 'C:/vs' in path else None
-        if name == 'nasm':
-            return 'C:/n/nasm' if path and '.gitlab' in path else None
         return f'C:/t/{name}' if name in present else None
 
     mocker.patch.object(tools.shutil, 'which', side_effect=which)
@@ -825,27 +836,10 @@ def test_windows_msvc_and_nasm(tmp_path: Path, mocker: MockerFixture):
     builder.phase_tools()
     activated.assert_called_once()
     assert builder.env['INCLUDE'] == 'x'
-    assert 'nasm not found; assembler-optimised' in builder.console.export_text()
-    script = builder.config.src_dir / '.gitlab' / 'ci' / 'download_nasm.cmake'
-    script.parent.mkdir(parents=True)
-    script.write_text('')
-    builder = _builder(tmp_path, mocker, os_name='windows', compiler_cache='none', yes=True)
-    run = mocker.patch.object(builder, 'run')
-    builder.phase_tools()
-    bullet = f"  • NASM into {builder.nasm_dir}, with VTK's download_nasm.cmake"
-    assert bullet in builder.console.export_text().splitlines()
-    assert run.call_args.args[0] == ['cmake', '-P', str(script)]
-    assert builder.env['PATH'].startswith(str(builder.nasm_dir))
-    builder.nasm_dir.mkdir(parents=True)
-    builder = _builder(tmp_path, mocker, os_name='windows', compiler_cache='none')
-    run = mocker.patch.object(builder, 'run')
-    builder.phase_tools()
-    assert not run.called
-    assert 'NASM' not in builder.console.export_text()
 
 
 def test_compiler_cache_auto_missing(tmp_path: Path, mocker: MockerFixture):
-    builder = _builder(tmp_path, mocker)
+    builder = _builder(tmp_path, mocker, compiler_cache='auto')
     mocker.patch.object(tools, 'compiler_cache_tool', return_value=None)
     builder._activate_compiler_cache()
     assert 'No ccache/sccache on PATH' in builder.console.export_text()
@@ -952,7 +946,7 @@ def test_disabled_groups_unset_their_keys(tmp_path: Path, mocker: MockerFixture,
 
 
 def test_build_wheel_repair_install_paths(tmp_path: Path, mocker: MockerFixture):
-    builder = _builder(tmp_path, mocker)
+    builder = _builder(tmp_path, mocker, repair=True)
     mocker.patch.object(builder, 'confirm', return_value=False)
     with pytest.raises(BuildError, match='Stopped before building'):
         builder.phase_build()
@@ -965,7 +959,7 @@ def test_build_wheel_repair_install_paths(tmp_path: Path, mocker: MockerFixture)
     with pytest.raises(BuildError, match='No wheel found'):
         builder._newest_wheel(tmp_path)
 
-    builder = _builder(tmp_path, mocker, install=True)
+    builder = _builder(tmp_path, mocker, install=True, repair=True)
     run = mocker.patch.object(builder, 'run')
     cfg = builder.config
     cfg.dist_dir.mkdir(parents=True)
@@ -1337,6 +1331,7 @@ def test_build_in_manylinux(tmp_path: Path, mocker: MockerFixture):
         dry_run=False,
         manylinux='img',
         source=src,
+        compiler_cache='auto',
         cache_dir=tmp_path / 'cc',
         with_=['web'],
         without=['io'],
@@ -1482,7 +1477,7 @@ def test_msvc_environment_skips_lines_without_value(mocker: MockerFixture, tmp_p
     assert env == {'INCLUDE': 'C:\\inc'}
 
 
-def test_windows_declined_msvc_and_nasm(tmp_path: Path, mocker: MockerFixture):
+def test_windows_declined_msvc(tmp_path: Path, mocker: MockerFixture):
     mocker.patch.object(tools.shutil, 'which', return_value=None)
     mocker.patch.object(tools, 'find_vcvarsall', return_value=tmp_path / 'vcvarsall.bat')
     activated = mocker.patch.object(tools, 'msvc_environment')
@@ -1490,21 +1485,11 @@ def test_windows_declined_msvc_and_nasm(tmp_path: Path, mocker: MockerFixture):
     mocker.patch.object(builder, 'confirm', return_value=False)
     builder._activate_msvc(tools.required_tools('windows', builder.manifest.tools, repair=False))
     assert not activated.called
-    script = builder.config.src_dir / '.gitlab' / 'ci' / 'download_nasm.cmake'
-    script.parent.mkdir(parents=True)
-    script.write_text('')
-    mocker.patch.object(
-        tools.shutil, 'which', side_effect=lambda name, **_: None if name == 'nasm' else name
-    )
-    mocker.patch.object(tools, 'executable_version', return_value='99.0')
-    mocker.patch.object(tools, 'python_build_packages', return_value=[])
-    mocker.patch.object(phases.sys.stdin, 'isatty', return_value=True)
-    mocker.patch.object(phases.Confirm, 'ask', return_value=False)
-    builder = _builder(tmp_path, mocker, os_name='windows', compiler_cache='none')
-    run = mocker.patch.object(builder, 'run')
-    with pytest.raises(BuildError, match='Nothing was installed'):
-        builder.phase_tools()
-    assert not run.called
+
+
+def test_manylinux_repairs_by_default(tmp_path: Path):
+    assert _config(tmp_path, manylinux='img').repairs
+    assert not _config(tmp_path, manylinux='img', repair=False).repairs
 
 
 def test_build_in_manylinux_forwarded_args(tmp_path: Path, mocker: MockerFixture):

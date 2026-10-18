@@ -44,19 +44,18 @@ The Steps
    PyVista supports. Use ``--ref`` for another tag, branch or commit, and
    ``--build-dir`` to put everything somewhere else. An existing checkout
    is reused as is, local edits included.
-2. **Tools.** ``git``, ``cmake``, ``ninja``, a C++ compiler and the wheel
-   repair tool are checked (see :ref:`build_tooling` for what each one
-   does). Everything the build would install is then listed, each item
-   with where it goes: ``cmake``, ``ninja`` and the repair tool when
-   missing or too old, ``setuptools`` and ``wheel``, NASM on Windows,
-   and the finished wheel with ``--install``. One confirmation covers the
+2. **Tools.** ``git``, ``cmake``, ``ninja``, a C++ compiler and, when the
+   wheel is repaired, the repair tool are checked (see :ref:`build_tooling`
+   for what each one does). Everything the build would install is then
+   listed, each item with where it goes: ``cmake``, ``ninja`` and the
+   repair tool when missing or too old, ``setuptools`` and ``wheel``, and
+   the finished wheel with ``--install``. One confirmation covers the
    whole list, and ``--yes`` answers it in advance. Without a terminal
    and without ``--yes`` the command stops instead of installing. A
    missing compiler stops with instructions for your operating system.
    On Windows, Visual Studio's build environment is imported
-   automatically. A compiler cache (``ccache`` or ``sccache``) is used
-   when one is on ``PATH``, so a second build after editing the source
-   is fast.
+   automatically. ``--compiler-cache auto`` adds a compiler cache
+   (``ccache`` or ``sccache``) when one is on ``PATH``.
 3. **Build options.** The modules to build are organized into named
    groups (``rendering``, ``io``, ``web``, ``headless-egl`` and more), each
    with a one-line description. The default set matches the stock wheel
@@ -77,9 +76,11 @@ The Steps
    printed in full before it runs.
 5. **Build** runs ``ninja`` and logs the full output to ``build.log``.
 6. **Wheel** runs ``setup.py bdist_wheel`` in the build tree.
-7. **Repair** copies VTK's shared libraries into the wheel so it installs
-   anywhere, not only next to the build tree. Skip it with
-   ``--no-repair``.
+7. **Repair** bundles the libraries the wheel links against and sets its
+   platform tag, so it installs on other machines. It runs by default on
+   Windows, where VTK leaves its libraries out of the wheel, and with
+   ``--manylinux``. ``--repair`` turns it on elsewhere and ``--no-repair``
+   turns it off.
 8. **Install** installs the wheel into the current environment with
    ``--install``, which is part of the confirmation in step 2. Without it,
    ``--interactive`` offers to, and otherwise the wheel's path and the
@@ -91,8 +92,8 @@ Without ``--interactive`` the only question is the install confirmation,
 and only when something is missing. Pass ``--yes`` in CI and scripts to
 answer it. ``--dry-run`` prints the commands, and the install list,
 without running anything. Optional steps keep their own switches, so
-``--no-repair`` skips the repair step and ``--install`` installs the
-wheel at the end.
+``--repair`` adds the repair step and ``--install`` installs the wheel
+at the end.
 
 .. code-block:: bash
 
@@ -175,14 +176,15 @@ The container image matches your machine's architecture
 (``manylinux_2_28_x86_64`` or ``manylinux_2_28_aarch64``) and carries
 the same Python version as the one running the command. The source is
 cloned or updated on your machine first. The container then installs
-VTK's build dependencies, ``ccache`` and PyVista's requirements, mounts
-the PyVista you are running read-only, and runs the remaining steps
-with the source and ``./vtk-build`` mounted, so the repaired wheel lands
-in ``vtk-build/wheelhouse`` and the compiler cache is kept between runs.
+VTK's build dependencies and PyVista's requirements, mounts the PyVista
+you are running read-only, and runs the remaining steps with the source
+and ``./vtk-build`` mounted, so the repaired wheel lands in
+``vtk-build/wheelhouse``.
 Files written by the container are handed back to your user, even when
-the build fails. Pass another image with ``--manylinux-image``. The
-compiler cache inside the container is always ``ccache``, and a build
-tree configured inside the container cannot be continued outside it.
+the build fails. Pass another image with ``--manylinux-image``. With
+``--compiler-cache`` the container installs ``ccache``, whichever cache
+was asked for, and keeps it between runs. A build tree configured inside
+the container cannot be continued outside it.
 On a Linux host the install step runs afterwards. On macOS and Windows
 the wheel is only written, since it is for Linux.
 
@@ -211,17 +213,16 @@ What the command looks for and offers to install:
   reconfigure only recompiles what changed. ``ccache`` is the usual
   choice on Linux and macOS; ``sccache`` is the one that supports MSVC
   on Windows. ``--compiler-cache auto`` uses whichever is on ``PATH``.
+  Off by default: within one build tree Ninja already rebuilds only what
+  changed, so a cache pays off when the tree is built from scratch, as in
+  CI.
 - **Wheel repair tools** copy the shared libraries a wheel depends on
-  into the wheel itself and set the platform tag, so it installs on a
-  machine without the build tree: `auditwheel
+  into the wheel itself and set the platform tag, so it installs on
+  other machines: `auditwheel
   <https://github.com/pypa/auditwheel>`_ on Linux, `delocate
   <https://github.com/matthew-brett/delocate>`_ on macOS and `delvewheel
   <https://github.com/adang1345/delvewheel>`_ on Windows. Installed with
-  ``pip`` when missing.
-- `NASM <https://www.nasm.us/>`_ is the assembler that VTK's bundled
-  libjpeg-turbo uses for its SIMD code paths. Needed on Windows only.
-  When it is missing, the command downloads it with VTK's own script
-  into the source tree and reuses that download later.
+  ``pip`` when missing and the wheel is repaired.
 - `setuptools <https://setuptools.pypa.io/>`_ and `wheel
   <https://wheel.readthedocs.io/>`_ are the Python packages that
   ``setup.py bdist_wheel`` needs to package the build tree. Installed

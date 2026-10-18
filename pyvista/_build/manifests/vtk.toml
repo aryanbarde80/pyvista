@@ -18,7 +18,6 @@ common = [
   "VTK_BUILD_EXAMPLES=OFF",
   "VTK_BUILD_TESTING=OFF",
   "VTK_DISPATCH_SOA_ARRAYS=ON",
-  "VTK_JPEG_ENABLE_SIMD=ON",
   "VTK_USE_PCH=OFF", # a precompiled header defeats the compiler cache
   "VTK_WHEEL_BUILD=ON",
   "VTK_WRAP_PYTHON=ON",

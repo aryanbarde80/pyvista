@@ -106,8 +106,8 @@ def _build(
     ] = False,
     compiler_cache: Annotated[
         Literal['auto', 'ccache', 'sccache', 'none'],
-        Parameter(help='Compiler launcher. ``auto`` uses whichever is on PATH.'),
-    ] = 'auto',
+        Parameter(help='Compiler cache, off by default. ``auto`` uses whichever is on PATH.'),
+    ] = 'none',
     cache_dir: Annotated[
         Path | None,
         Parameter(
@@ -128,8 +128,12 @@ def _build(
         ),
     ] = None,
     repair: Annotated[
-        bool, Parameter(help='Bundle shared libraries into the wheel (``--no-repair`` to skip).')
-    ] = True,
+        bool | None,
+        Parameter(
+            help='Bundle the libraries the wheel links against. '
+            'Defaults to on for Windows and ``--manylinux``.'
+        ),
+    ] = None,
     install: Annotated[
         bool, Parameter(help='Install the built wheel into this environment.')
     ] = False,
