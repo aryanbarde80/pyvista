@@ -128,12 +128,11 @@ def _build(
         ),
     ] = None,
     repair: Annotated[
-        bool | None,
+        bool,
         Parameter(
-            help='Bundle the libraries the wheel links against. '
-            'Defaults to on for Windows and ``--manylinux``.'
+            help='Bundle the libraries the wheel links against and tag it for other machines.'
         ),
-    ] = None,
+    ] = False,
     install: Annotated[
         bool, Parameter(help='Install the built wheel into this environment.')
     ] = False,

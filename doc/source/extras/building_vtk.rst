@@ -76,11 +76,10 @@ The Steps
    printed in full before it runs.
 5. **Build** runs ``ninja`` and logs the full output to ``build.log``.
 6. **Wheel** runs ``setup.py bdist_wheel`` in the build tree.
-7. **Repair** bundles the libraries the wheel links against and sets its
-   platform tag, so it installs on other machines. It runs by default on
-   Windows, where VTK leaves its libraries out of the wheel, and with
-   ``--manylinux``. ``--repair`` turns it on elsewhere and ``--no-repair``
-   turns it off.
+7. **Repair** runs with ``--repair``: it bundles the libraries the wheel
+   links against and sets its platform tag, so it installs on other
+   machines. The wheel installs and runs on the machine that built it
+   without this step.
 8. **Install** installs the wheel into the current environment with
    ``--install``, which is part of the confirmation in step 2. Without it,
    ``--interactive`` offers to, and otherwise the wheel's path and the
@@ -170,7 +169,7 @@ running:
 
 .. code-block:: bash
 
-    pyvista build vtk --manylinux
+    pyvista build vtk --manylinux --repair
 
 The container image matches your machine's architecture
 (``manylinux_2_28_x86_64`` or ``manylinux_2_28_aarch64``) and carries
@@ -178,7 +177,8 @@ the same Python version as the one running the command. The source is
 cloned or updated on your machine first. The container then installs
 VTK's build dependencies and PyVista's requirements, mounts the PyVista
 you are running read-only, and runs the remaining steps with the source
-and ``./vtk-build`` mounted, so the repaired wheel lands in
+and ``./vtk-build`` mounted. ``--repair`` runs ``auditwheel`` there,
+which gives the wheel its ``manylinux`` tag and puts it in
 ``vtk-build/wheelhouse``.
 Files written by the container are handed back to your user, even when
 the build fails. Pass another image with ``--manylinux-image``. With
