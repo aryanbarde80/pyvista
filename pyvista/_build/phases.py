@@ -108,17 +108,12 @@ class BuildConfig:
     reconfigure: bool = False
     update: bool = False
     version_suffix: str | None = None
-    repair: bool | None = None
+    repair: bool = False
     install: bool = False
     yes: bool = False
     interactive: bool = False
     dry_run: bool = False
     os_name: str = field(default_factory=_tools.host_os)
-
-    @property
-    def repairs(self) -> bool:  # numpydoc ignore=RT01
-        """Whether to repair the wheel: ``repair`` when set, else only on Windows."""
-        return self.repair if self.repair is not None else self.os_name == 'windows'
 
     @property
     def src_dir(self) -> Path:  # numpydoc ignore=RT01
@@ -514,7 +509,7 @@ class Builder:
         """Check every tool, then install what is missing after one confirmation."""
         cfg = self.config
         self.step('2/8 Tools')
-        tools = _tools.required_tools(cfg.os_name, self.manifest.tools, repair=cfg.repairs)
+        tools = _tools.required_tools(cfg.os_name, self.manifest.tools, repair=cfg.repair)
         table = Table(show_header=True, header_style='bold purple')
         table.add_column('Tool')
         table.add_column('Found')
@@ -907,7 +902,7 @@ class Builder:
         """Bundle the shared libraries into the wheel."""
         cfg = self.config
         self.step('7/8 Repair')
-        if not cfg.repairs:
+        if not cfg.repair:
             self.say('Skipped. --repair bundles the system libraries the wheel links against.')
             return
         self.say(

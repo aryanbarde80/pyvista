@@ -275,7 +275,8 @@ def no_tools(mocker: MockerFixture):
 @pytest.mark.parametrize('os_name', OS_NAMES)
 def test_dry_run_commands(tmp_path: Path, os_name):
     console = Console(record=True, width=4000, force_terminal=False)
-    builder = Builder(_config(tmp_path, os_name=os_name, defines=['FOO=1'], ref='v9.7.0'), console)
+    cfg = _config(tmp_path, os_name=os_name, defines=['FOO=1'], ref='v9.7.0', repair=True)
+    builder = Builder(cfg, console)
     assert builder.build() is None
     out = console.export_text()
     assert out.startswith('Building backend: vtk')
@@ -285,25 +286,15 @@ def test_dry_run_commands(tmp_path: Path, os_name):
     assert '-DVTK_VERSION_SUFFIX= ' in out
     configure = next(line for line in out.splitlines() if ' -GNinja' in line)
     assert ('_PYTHON_HOST_PLATFORM=macosx-11.0-' in configure) == (os_name == 'macos')
-    assert ('delvewheel repair' in out) == (os_name == 'windows')
-    assert ('Skipped. --repair' in out) == (os_name != 'windows')
+    repairer = {
+        'linux': 'auditwheel repair',
+        'macos': 'delocate-wheel',
+        'windows': 'delvewheel repair',
+    }
+    assert repairer[os_name] in out
     assert 'setup.py bdist_wheel' in out
     assert '--force-reinstall' in out  # printed as the install hint
     assert 'COMPILER_LAUNCHER' not in out
-
-
-@pytest.mark.parametrize(
-    ('os_name', 'repair', 'expected'),
-    [
-        ('linux', None, False),
-        ('macos', None, False),
-        ('windows', None, True),
-        ('linux', True, True),
-        ('windows', False, False),
-    ],
-)
-def test_repair_default(tmp_path: Path, os_name, repair, expected):
-    assert _config(tmp_path, os_name=os_name, repair=repair).repairs is expected
 
 
 @pytest.mark.usefixtures('no_tools')
@@ -312,7 +303,6 @@ def test_dry_run_flags(tmp_path: Path):
     cfg = _config(
         tmp_path,
         minimal=True,
-        repair=False,
         build_type='Debug',
         jobs=3,
         ref='main',
