@@ -286,7 +286,12 @@ def no_tools(mocker: MockerFixture):
 def test_dry_run_commands(tmp_path: Path, os_name):
     console = Console(record=True, width=4000, force_terminal=False)
     cfg = _config(
-        tmp_path, os_name=os_name, defines=['FOO=1'], ref='v9.7.0', compiler_cache='auto'
+        tmp_path,
+        os_name=os_name,
+        defines=['FOO=1'],
+        ref='v9.7.0',
+        compiler_cache='auto',
+        repair=True,
     )
     builder = Builder(cfg, console)
     assert builder.build() is None
@@ -298,27 +303,17 @@ def test_dry_run_commands(tmp_path: Path, os_name):
     assert '-DVTK_VERSION_SUFFIX= ' in out
     configure = next(line for line in out.splitlines() if ' -GNinja' in line)
     assert ('_PYTHON_HOST_PLATFORM=macosx-11.0-' in configure) == (os_name == 'macos')
-    assert ('delvewheel repair' in out) == (os_name == 'windows')
-    assert ('Skipped. --repair' in out) == (os_name != 'windows')
+    repairer = {
+        'linux': 'auditwheel repair',
+        'macos': 'delocate-wheel',
+        'windows': 'delvewheel repair',
+    }
+    assert repairer[os_name] in out
     assert 'setup.py bdist_wheel' in out
     assert '--force-reinstall' in out  # printed as the install hint
     launcher = 'sccache' if os_name == 'windows' else 'ccache'
     assert f'-DCMAKE_CXX_COMPILER_LAUNCHER={launcher}' in out
     assert f'$ {launcher} --show-stats' in out
-
-
-@pytest.mark.parametrize(
-    ('os_name', 'repair', 'expected'),
-    [
-        ('linux', None, False),
-        ('macos', None, False),
-        ('windows', None, True),
-        ('linux', True, True),
-        ('windows', False, False),
-    ],
-)
-def test_repair_default(tmp_path: Path, os_name, repair, expected):
-    assert _config(tmp_path, os_name=os_name, repair=repair).repairs is expected
 
 
 @pytest.mark.usefixtures('no_tools')
@@ -327,7 +322,6 @@ def test_dry_run_flags(tmp_path: Path):
     cfg = _config(
         tmp_path,
         minimal=True,
-        repair=False,
         build_type='Debug',
         jobs=3,
         ref='main',
@@ -1487,11 +1481,6 @@ def test_windows_declined_msvc(tmp_path: Path, mocker: MockerFixture):
     assert not activated.called
 
 
-def test_manylinux_repairs_by_default(tmp_path: Path):
-    assert _config(tmp_path, manylinux='img').repairs
-    assert not _config(tmp_path, manylinux='img', repair=False).repairs
-
-
 def test_build_in_manylinux_forwarded_args(tmp_path: Path, mocker: MockerFixture):
     mocker.patch.object(tools.shutil, 'which', side_effect=lambda name, **_: f'/usr/bin/{name}')
     mocker.patch.object(subprocess, 'run', return_value=subprocess.CompletedProcess([], 0))
@@ -1502,7 +1491,7 @@ def test_build_in_manylinux_forwarded_args(tmp_path: Path, mocker: MockerFixture
         url='https://x/vtk.git',
         ref='v1',
         all_=True,
-        compiler_cache='none',
+        repair=True,
     )
     builder = Builder(cfg, Console(quiet=True))
     run = mocker.patch.object(builder, 'run')
