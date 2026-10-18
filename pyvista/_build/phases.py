@@ -108,7 +108,7 @@ class BuildConfig:
     clean: bool = False
     reconfigure: bool = False
     update: bool = False
-    compiler_cache: str = 'auto'
+    compiler_cache: str = 'none'
     cache_dir: Path | None = None
     version_suffix: str | None = None
     repair: bool | None = None
@@ -573,11 +573,7 @@ class Builder:
         if cfg.install and _tools.pip_install_command() is None:
             msg = '--install needs pip or uv in this environment.'
             raise BuildError(msg)
-        nasm_script = self._nasm_script()
-        plan = self.install_plan(specs)
-        if nasm_script is not None:
-            plan.append(f"NASM into {self.nasm_dir}, with VTK's {nasm_script.name}")
-        self.confirm_installs(plan)
+        self.confirm_installs(self.install_plan(specs))
         if cmd is not None:
             self.run(cmd)
             if not cfg.dry_run:
@@ -585,8 +581,6 @@ class Builder:
                 if bad:
                     msg = f'Still not usable after install: {", ".join(bad)}.'
                     raise BuildError(msg)
-        if nasm_script is not None:
-            self._install_nasm(nasm_script)
         self._activate_compiler_cache()
 
     def _activate_msvc(self, tools: list[_tools.Tool]) -> None:
@@ -608,37 +602,6 @@ class Builder:
             except subprocess.CalledProcessError as err:
                 msg = f'{vcvarsall} failed with exit status {err.returncode}.'
                 raise BuildError(msg) from None
-
-    @property
-    def nasm_dir(self) -> Path:  # numpydoc ignore=RT01
-        """Where VTK's download script puts NASM."""
-        return self.config.src_dir / '.gitlab' / 'nasm'
-
-    def _nasm_script(self) -> Path | None:
-        """Return VTK's NASM download script on Windows when no NASM is usable, else ``None``."""
-        cfg = self.config
-        if cfg.os_name != 'windows':
-            return None
-        if self.nasm_dir.is_dir():
-            self.env['PATH'] = f'{self.nasm_dir}{os.pathsep}{self.env.get("PATH", "")}'
-        if _tools.detect(_tools.Tool('nasm', ('nasm',)), self.env):
-            return None
-        script = cfg.src_dir / '.gitlab' / 'ci' / 'download_nasm.cmake'
-        if not script.is_file():
-            self.say(
-                '[yellow]nasm not found; assembler-optimised codecs will be disabled.[/yellow]'
-            )
-            return None
-        return script
-
-    def _install_nasm(self, script: Path) -> None:
-        """Download NASM with VTK's script and put it on the build PATH."""
-        self.run(
-            ['cmake', '-P', str(script)],
-            cwd=self.config.src_dir,
-            env={'CMAKE_CONFIGURATION': 'windows'},
-        )
-        self.env['PATH'] = f'{self.nasm_dir}{os.pathsep}{self.env.get("PATH", "")}'
 
     def _compiler_cache_row(self) -> tuple[str, str, str]:
         """Return the tools-table row for the ``--compiler-cache`` choice."""
