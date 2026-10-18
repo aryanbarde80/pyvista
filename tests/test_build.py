@@ -119,7 +119,6 @@ def test_vtk_manifest_defaults_match_ci_flags(os_name):
         'VTK_DISPATCH_SOA_ARRAYS=ON',
         'VTK_WRAP_SERIALIZATION=ON',
         'VTK_BUILD_PYI_FILES=ON',
-        'VTK_JPEG_ENABLE_SIMD=ON',
         'VTK_MODULE_ENABLE_VTK_FiltersParallelDIY2=YES',
         'VTK_MODULE_ENABLE_VTK_RenderingMatplotlib=YES',
         'VTK_MODULE_ENABLE_VTK_IOImport=YES',
